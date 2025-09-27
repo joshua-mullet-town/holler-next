@@ -1,103 +1,104 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
+import { io, Socket } from 'socket.io-client';
+import HollerSessionManager from '../components/HollerSessionManager';
+
+export default function HollerTerminal() {
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [globalSocket, setGlobalSocket] = useState<Socket | null>(null);
+  const [isSocketConnected, setIsSocketConnected] = useState(false);
+  
+  // Initialize global socket connection once
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    console.log('🌐 Initializing global socket connection');
+    const socket = io();
+    
+    socket.on('connect', () => {
+      console.log('🔌 Global socket connected');
+      setIsSocketConnected(true);
+    });
+    
+    socket.on('disconnect', () => {
+      console.log('🔌 Global socket disconnected');
+      setIsSocketConnected(false);
+    });
+    
+    setGlobalSocket(socket);
+    setIsHydrated(true);
+    
+    return () => {
+      console.log('🧹 Cleaning up global socket');
+      socket.disconnect();
+    };
+  }, []);
+
+  // Prevent hydration mismatches
+  if (!isHydrated) {
+    return <div className="min-h-screen bg-gradient-to-br from-orange-400 via-yellow-500 to-orange-600" />;
+  }
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
+    <div className="min-h-screen bg-gradient-to-br from-orange-400 via-yellow-500 to-orange-600">
+      {/* Western sky background with animated clouds */}
+      <div className="absolute inset-0 overflow-hidden">
+        <motion.div 
+          className="absolute top-20 left-1/4 w-32 h-8 bg-white/20 rounded-full blur-sm"
+          animate={{ x: [0, 100, 0] }}
+          transition={{ duration: 20, repeat: Infinity }}
         />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+        <motion.div 
+          className="absolute top-32 right-1/3 w-24 h-6 bg-white/15 rounded-full blur-sm"
+          animate={{ x: [0, -80, 0] }}
+          transition={{ duration: 15, repeat: Infinity }}
+        />
+      </div>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+      <div className="relative z-10 flex flex-col h-screen">
+        {/* Header */}
+        <header className="flex items-center justify-between p-6 text-black">
+          <div className="flex items-center space-x-3">
+            <div className="text-4xl font-bold">🤠</div>
+            <div>
+              <h1 className="text-3xl font-bold font-mono">The Holler</h1>
+              <p className="text-sm opacity-75">VS Code Terminal</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-4">
+            <a 
+              href="https://www.hulu.com/series/fdeb1018-4472-442f-ba94-fb087cdea069"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="bg-gradient-to-r from-orange-500 to-red-600 hover:from-orange-600 hover:to-red-700 text-white px-3 py-3 rounded-lg font-semibold flex items-center justify-center transition-all duration-200 transform hover:scale-105 shadow-lg hover:shadow-xl"
+              title="Watch Bob's Burgers on Hulu"
+            >
+              <img 
+                src="/tina.png" 
+                alt="Tina Belcher" 
+                className="w-8 h-8" 
+              />
+            </a>
+          </div>
+        </header>
+
+        {/* Main terminal area */}
+        <div className="flex-1 bg-black/20 backdrop-blur-md border border-white/30 mx-6 mb-6 rounded-lg" style={{ overflow: 'visible' }}>
+          {!isSocketConnected ? (
+            <div className="flex items-center justify-center h-full text-white">
+              <div className="text-center">
+                <div className="animate-spin text-4xl mb-4">🤠</div>
+                <p className="text-xl">Connecting to Holler Terminal Server...</p>
+              </div>
+            </div>
+          ) : (
+            <HollerSessionManager />
+          )}
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </div>
     </div>
   );
 }

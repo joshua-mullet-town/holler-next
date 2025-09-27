@@ -1,0 +1,35 @@
+{
+  "sessions": {
+    "35dcc80d-fce7-485e-bfdd-6496b8cb53d6": {
+      "id": "35dcc80d-fce7-485e-bfdd-6496b8cb53d6",
+      "name": "First Proj",
+      "created": "2025-08-16T12:15:41.987Z",
+      "lastActivity": "2025-08-16T12:15:41.987Z",
+      "status": "ready",
+      "theme": "default",
+      "cwd": "/Users/joshuamullet/code/holler",
+      "gitBranch": "-"
+    },
+    "d45c553c-aa4d-4ee4-a9d3-d9c5f172a6ff": {
+      "id": "d45c553c-aa4d-4ee4-a9d3-d9c5f172a6ff",
+      "name": "Good STuff",
+      "created": "2025-08-16T12:21:47.350Z",
+      "lastActivity": "2025-08-16T12:21:47.350Z",
+      "status": "ready",
+      "theme": "default",
+      "cwd": "/Users/joshuamullet/code/holler",
+      "gitBranch": "-"
+    },
+    "c7d127dd-3322-446d-95de-9568fbbbee1f": {
+      "id": "c7d127dd-3322-446d-95de-9568fbbbee1f",
+      "name": "Test Fixing Session",
+      "created": "2025-08-16T19:51:33.535Z",
+      "lastActivity": "2025-08-16T19:51:33.535Z",
+      "status": "ready",
+      "theme": "default",
+      "cwd": "/Users/joshuamullet/code/holler",
+      "gitBranch": "-"
+    }
+  },
+  "lastUpdated": "2025-08-16T19:51:33.535Z"
+}
