@@ -1166,34 +1166,34 @@ app.prepare().then(() => {
       }
     });
 
-    // Handle autonomous mode toggle
-    socket.on('session:toggle-autonomous', async (data) => {
-      const { sessionId, autonomousMode } = data;
-      if (!sessionId || autonomousMode === undefined) {
-        console.error('❌ Autonomous Toggle: Missing sessionId or autonomousMode flag');
+    // Handle Jarvis mode toggle
+    socket.on('session:toggle-jarvis', async (data) => {
+      const { sessionId, jarvisMode } = data;
+      if (!sessionId || jarvisMode === undefined) {
+        console.error('❌ Jarvis Toggle: Missing sessionId or jarvisMode flag');
         return;
       }
 
-      console.log(`🔄 Autonomous mode toggle request: ${sessionId} → ${autonomousMode ? 'ON' : 'OFF'}`);
+      console.log(`🔄 Jarvis mode toggle request: ${sessionId} → ${jarvisMode ? 'ON' : 'OFF'}`);
 
       try {
-        // Update the session with autonomous mode flag
-        const success = sessionManager.updateSessionAutonomousMode(sessionId, autonomousMode);
+        // Update the session with Jarvis mode flag
+        const success = sessionManager.updateSessionJarvisMode(sessionId, jarvisMode);
 
         if (success) {
-          console.log(`✅ Autonomous mode ${autonomousMode ? 'ENABLED' : 'DISABLED'} for session: ${sessionId}`);
+          console.log(`✅ Jarvis mode ${jarvisMode ? 'ENABLED' : 'DISABLED'} for session: ${sessionId}`);
 
           // Broadcast the update to all connected clients
-          io.emit('session:autonomous-updated', {
+          io.emit('session:jarvis-updated', {
             sessionId: sessionId,
-            autonomousMode: autonomousMode
+            jarvisMode: jarvisMode
           });
         } else {
-          console.error(`❌ Failed to update autonomous mode for session: ${sessionId}`);
+          console.error(`❌ Failed to update Jarvis mode for session: ${sessionId}`);
         }
 
       } catch (error) {
-        console.error('❌ Error toggling autonomous mode:', error);
+        console.error('❌ Error toggling Jarvis mode:', error);
       }
     });
 

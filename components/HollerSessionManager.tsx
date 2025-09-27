@@ -20,7 +20,7 @@ interface HollerSession {
   claudeSessionId?: string | null;
   status?: 'loading' | 'connected' | 'ready' | 'disconnected';
   projectPath?: string;
-  autonomousMode?: boolean;
+  jarvisMode?: boolean;
 }
 
 interface TerminalInstance {
@@ -276,16 +276,16 @@ const HollerSessionManager: React.FC = () => {
           ));
         });
 
-        // Listen for autonomous mode updates
-        socketConnection.on('session:autonomous-updated', (update: {
+        // Listen for Jarvis mode updates
+        socketConnection.on('session:jarvis-updated', (update: {
           sessionId: string,
-          autonomousMode: boolean
+          jarvisMode: boolean
         }) => {
-          console.log(`🔄 Autonomous mode update: ${update.sessionId} → ${update.autonomousMode ? 'ON' : 'OFF'}`);
+          console.log(`🔄 Jarvis mode update: ${update.sessionId} → ${update.jarvisMode ? 'ON' : 'OFF'}`);
 
           setSessions(prev => prev.map(session =>
             session.id === update.sessionId
-              ? { ...session, autonomousMode: update.autonomousMode }
+              ? { ...session, jarvisMode: update.jarvisMode }
               : session
           ));
         });
@@ -1048,32 +1048,35 @@ const HollerSessionManager: React.FC = () => {
                                 <span>Copy Resume</span>
                               </button>
 
-                              {/* Autonomous Mode Toggle - Per Session */}
+                              {/* Jarvis Mode Toggle - Per Session */}
                               <div className="mt-2 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-all duration-200">
-                                <span className="text-xs text-white/80">AI Observer</span>
+                                <span className="text-xs text-white/80 flex items-center space-x-1">
+                                  <span>🤖</span>
+                                  <span>Jarvis Mode</span>
+                                </span>
                                 <motion.button
                                   onClick={async (e) => {
                                     e.stopPropagation();
                                     if (!socket) return;
                                     
-                                    const newAutonomousMode = !session.autonomousMode;
+                                    const newJarvisMode = !session.jarvisMode;
                                     
-                                    console.log(`🔄 Toggling autonomous mode: ${newAutonomousMode ? 'ON' : 'OFF'} for session ${session.id}`);
+                                    console.log(`🔄 Toggling Jarvis mode: ${newJarvisMode ? 'ON' : 'OFF'} for session ${session.id}`);
                                     
                                     try {
-                                      socket.emit('session:toggle-autonomous', {
+                                      socket.emit('session:toggle-jarvis', {
                                         sessionId: session.id,
-                                        autonomousMode: newAutonomousMode
+                                        jarvisMode: newJarvisMode
                                       });
                                       
-                                      console.log(`✅ Autonomous mode ${newAutonomousMode ? 'ENABLED' : 'DISABLED'} for session: ${session.id}`);
+                                      console.log(`✅ Jarvis mode ${newJarvisMode ? 'ENABLED' : 'DISABLED'} for session: ${session.id}`);
                                     } catch (error) {
-                                      console.error('❌ Failed to toggle autonomous mode:', error);
+                                      console.error('❌ Failed to toggle Jarvis mode:', error);
                                     }
                                   }}
                                   className={`relative w-8 h-4 rounded-full transition-all ml-2 ${
-                                    session.autonomousMode 
-                                      ? 'bg-purple-500' 
+                                    session.jarvisMode 
+                                      ? 'bg-blue-500 shadow-blue-500/50 shadow-lg' 
                                       : 'bg-gray-600'
                                   }`}
                                   whileTap={{ scale: 0.95 }}
@@ -1081,7 +1084,7 @@ const HollerSessionManager: React.FC = () => {
                                   <motion.div
                                     className="w-3 h-3 bg-white rounded-full absolute top-0.5"
                                     animate={{
-                                      x: session.autonomousMode ? 18 : 2
+                                      x: session.jarvisMode ? 18 : 2
                                     }}
                                     transition={{ type: "spring", stiffness: 500, damping: 30 }}
                                   />
