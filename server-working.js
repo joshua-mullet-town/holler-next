@@ -941,16 +941,151 @@ async function launchPlannerSession(plannerSession, io) {
   try {
     console.log(`🧠 JARVIS: Launching Planner session: ${plannerSession.id}`);
 
-    // TODO: This is where we'll integrate VoiceMode and send the Planner prompt
-    // For now, just create the session - we'll implement the prompt in the next step
-    
     // Emit session creation to establish terminal connection
     io.emit('session:created', plannerSession);
+
+    // Wait a moment for terminal to be ready, then send the comprehensive Planner prompt
+    setTimeout(async () => {
+      await sendPlannerPrompt(plannerSession, io);
+    }, 2000); // 2 second delay to ensure terminal is ready
 
     console.log(`✅ JARVIS: Planner session launched: ${plannerSession.id}`);
 
   } catch (error) {
     console.error('❌ JARVIS: Error launching Planner session:', error);
+  }
+}
+
+/**
+ * 🎯 JARVIS: Send comprehensive Planner prompt to cloned session
+ */
+async function sendPlannerPrompt(plannerSession, io) {
+  try {
+    console.log(`🎯 JARVIS: Sending Planner prompt to session: ${plannerSession.id}`);
+
+    const plannerPrompt = `
+🤖 **JARVIS MODE: You are now the PLANNER AGENT**
+
+## Your Role
+You are a voice-enabled collaborative partner helping a developer who **CANNOT SEE THE SCREEN** and is working hands-free. Your job is to:
+
+1. **Analyze the conversation context** - Look at the last user request and Claude's response
+2. **Summarize what happened** in voice-friendly language for someone walking around
+3. **Research files when needed** to understand the codebase and context
+4. **Collaborate on next steps** through natural conversation
+5. **Plan the next prompt** for a fresh Executor session
+
+## Critical Constraints
+
+### 🚫 **SCREEN-FREE USER**
+- The user is walking around and CANNOT see your tool usage, code, or responses
+- Make ALL responses conversational and descriptive
+- Explain what you're looking at when researching files
+- No tool usage should be silent - narrate your actions
+
+### 🔍 **DISCREPANCY ANALYSIS** 
+- Compare the user's original request vs what Claude actually did
+- **Flag any unasked-for changes or deviations from the plan**
+- Be suspicious and thorough - point out anything that wasn't requested
+
+### 📁 **RESEARCH EXTENSIVELY**
+- Use Read, Grep, and file tools to understand context
+- Check todo.md, session.md, and relevant code files
+- Don't make assumptions - investigate thoroughly when needed
+
+### 🎤 **VOICE COLLABORATION**
+- Engage in natural back-and-forth conversation
+- Ask clarifying questions when needed
+- Build understanding together before acting
+- Wait for the magic phrase "go get 'em" before finalizing
+
+## Workflow
+
+1. **Voice Summary**: Start by explaining what the last Claude response accomplished
+2. **Research Phase**: Investigate files/context as needed (narrate what you're doing)
+3. **Discrepancy Check**: Point out any deviations from the original request
+4. **Collaboration**: Discuss next steps and refine the approach
+5. **Final Planning**: When ready, prepare the next prompt for execution
+
+## Magic Phrase Detection
+When you hear "go get 'em" (or variations like "go get them", "let's go"), respond with:
+
+\`\`\`json
+{
+  "readyToSend": true,
+  "finalPrompt": "The carefully crafted prompt for the Executor session",
+  "metadata": {
+    "summary": "Brief summary of what this prompt will accomplish",
+    "files_researched": ["list", "of", "files", "you", "investigated"],
+    "discrepancies_found": ["any", "issues", "or", "deviations", "noted"]
+  }
+}
+\`\`\`
+
+## Important Notes
+- You have full repo access and dangerous permissions - use them wisely
+- Take your time to understand the full context before planning
+- Be conversational and helpful - you're a collaborative partner, not just a tool
+- Remember: the user can't see anything, so describe everything you're doing
+
+---
+
+**Ready to start! Tell me about the last interaction and let's plan the next steps together.**
+`;
+
+    // Send the prompt to the Planner session terminal
+    const success = await sendMessageToSession(plannerSession.id, plannerPrompt, io);
+    
+    if (success) {
+      console.log(`✅ JARVIS: Planner prompt sent successfully to ${plannerSession.id}`);
+    } else {
+      console.error(`❌ JARVIS: Failed to send Planner prompt to ${plannerSession.id}`);
+    }
+
+  } catch (error) {
+    console.error('❌ JARVIS: Error sending Planner prompt:', error);
+  }
+}
+
+/**
+ * 📤 Send message to specific session terminal
+ */
+async function sendMessageToSession(sessionId, message, io) {
+  try {
+    // Find the terminal ID for this session
+    const session = sessionManager.getSession(sessionId);
+    if (!session) {
+      console.error(`❌ Session ${sessionId} not found for message sending`);
+      return false;
+    }
+
+    const terminalId = session.terminalId;
+    if (!terminalId) {
+      console.error(`❌ No terminal ID found for session ${sessionId}`);
+      return false;
+    }
+
+    // Send message to terminal using the same multi-sequence approach as manual messages
+    const success = terminalManager.writeToTerminal(terminalId, message + '\n');
+    
+    if (success) {
+      // Follow up with carriage return sequences like the manual button does
+      setTimeout(() => {
+        terminalManager.writeToTerminal(terminalId, '\r\n');
+      }, 100);
+      
+      setTimeout(() => {
+        terminalManager.writeToTerminal(terminalId, '\r');
+      }, 200);
+      
+      return true;
+    }
+    
+    return false;
+
+  } catch (error) {
+    console.error('❌ Error sending message to session:', error);
+    return false;
   }
 }
 
