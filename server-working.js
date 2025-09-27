@@ -864,6 +864,107 @@ app.prepare().then(() => {
   // Set up file monitor event listeners with access to io
   setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager);
 
+/**
+ * 🤖 JARVIS MODE: Start Planner cycle by cloning session
+ */
+async function startJarvisPlannerCycle(executorSessionId, sessionManager, io) {
+  try {
+    console.log(`🤖 JARVIS: Starting Planner cycle for executor session: ${executorSessionId}`);
+
+    // Get the executor session details
+    const executorSession = sessionManager.getSession(executorSessionId);
+    if (!executorSession) {
+      console.error(`❌ JARVIS: Executor session ${executorSessionId} not found`);
+      return;
+    }
+
+    if (!executorSession.claudeSessionId) {
+      console.error(`❌ JARVIS: Executor session ${executorSessionId} has no Claude session to clone`);
+      return;
+    }
+
+    // Generate new IDs for the Planner session
+    const timestamp = Date.now();
+    const plannerHollerSessionId = `jarvis-planner-${timestamp}`;
+    const plannerClaudeSessionId = generateUUID();
+    const plannerTerminalId = `jarvis-terminal-${timestamp}`;
+
+    console.log(`🧬 JARVIS: Cloning session ${executorSession.claudeSessionId} → ${plannerClaudeSessionId}`);
+
+    // Clone the conversation using existing method
+    const cloneResult = await fetch('http://localhost:3002/api/sessions/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        originalClaudeSessionId: executorSession.claudeSessionId,
+        newClaudeSessionId: plannerClaudeSessionId
+      })
+    });
+
+    if (!cloneResult.ok) {
+      const errorData = await cloneResult.json();
+      throw new Error(errorData.error || 'Failed to clone conversation for Planner');
+    }
+
+    const cloneData = await cloneResult.json();
+    console.log(`✅ JARVIS: Conversation cloned successfully: ${cloneData.messageCount} messages`);
+
+    // Create Planner Holler session
+    const plannerSession = {
+      id: plannerHollerSessionId,
+      name: `🤖 Jarvis Planner (${executorSession.name})`,
+      terminalId: plannerTerminalId,
+      claudeSessionId: plannerClaudeSessionId,
+      created: new Date().toISOString(),
+      projectPath: executorSession.projectPath || '/Users/joshuamullet/code/holler',
+      isJarvisPlanner: true,
+      parentExecutorSession: executorSessionId
+    };
+
+    // Add Planner session to session manager
+    sessionManager.addSession(plannerSession);
+
+    // Launch Planner session with comprehensive prompt
+    await launchPlannerSession(plannerSession, io);
+
+    console.log(`🚀 JARVIS: Planner cycle started successfully: ${plannerHollerSessionId}`);
+
+  } catch (error) {
+    console.error('❌ JARVIS: Error starting Planner cycle:', error);
+  }
+}
+
+/**
+ * 🧠 JARVIS: Launch Planner session with comprehensive prompt
+ */
+async function launchPlannerSession(plannerSession, io) {
+  try {
+    console.log(`🧠 JARVIS: Launching Planner session: ${plannerSession.id}`);
+
+    // TODO: This is where we'll integrate VoiceMode and send the Planner prompt
+    // For now, just create the session - we'll implement the prompt in the next step
+    
+    // Emit session creation to establish terminal connection
+    io.emit('session:created', plannerSession);
+
+    console.log(`✅ JARVIS: Planner session launched: ${plannerSession.id}`);
+
+  } catch (error) {
+    console.error('❌ JARVIS: Error launching Planner session:', error);
+  }
+}
+
+/**
+ * Generate UUID helper function
+ */
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = Math.random() * 16 | 0;
+    const v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
   io.on('connection', (socket) => {
     console.log('🔌 Client connected:', socket.id);
     let currentTerminal = null;
@@ -1188,6 +1289,11 @@ app.prepare().then(() => {
             sessionId: sessionId,
             jarvisMode: jarvisMode
           });
+
+          // 🤖 JARVIS MODE: If enabled, immediately clone session and start Planner
+          if (jarvisMode) {
+            await startJarvisPlannerCycle(sessionId, sessionManager, io);
+          }
         } else {
           console.error(`❌ Failed to update Jarvis mode for session: ${sessionId}`);
         }
