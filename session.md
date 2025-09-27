@@ -1,69 +1,117 @@
-# Session - Fixing Catastrophic Refactor Damage
+# Jarvis Mode - Voice Collaborative AI Development System
 
-## CRITICAL: Development Server Info
-**PORT: localhost:3002** - Server is already running and managed by user
-**NEVER START A SERVER** - The dev server is already running on port 3002
-**FOR TESTING**: Always use localhost:3002 - it's already up and running
+## 🎯 Vision Complete: Tag-Team Planner/Executor System
 
-## Current Active Problem
-We refactored the 1700+ line monolith to avoid coding errors, but in the process we completely broke core functionality and introduced massive bugs. This is a complete disaster.
+**CORE CONCEPT**: Voice-collaborative development where user walks around hands-free while Claude handles the technical execution through intelligent session cycling.
 
-**UPDATE: FIXED NEXT.JS BUILD CORRUPTION**
-- Deleted corrupted .next directory 
-- Rebuilt successfully - app should start now
-- Next.js bootstrap error was due to corrupted build cache
+## ✅ COMPLETED MAJOR MILESTONES
 
-**READY FOR TESTING**: App should now load on localhost:3002 (once you restart your dev server)
+### 1. **Jarvis Mode Toggle & Session Management** ✅
+- **UI Toggle**: Replaced autonomous mode with Jarvis Mode toggle (🤖 blue glow)
+- **Session State**: Added `jarvisMode: boolean` and `mode: "planning"|"execution"` to holler-sessions.json
+- **Plan Storage**: Added `plan` field for persistent plan management across cycles
 
-## What's Actually Broken Right Now (Not Working)
+### 2. **Magic Phrase Execution System** ✅
+- **Natural Language Mapping**: "go to pound town claude code" → `/execute-plan` via CLAUDE.md
+- **Slash Command**: `/execute-plan` triggers complete execution workflow
+- **Non-Blocking Job Queue**: Script schedules commands with backend, exits immediately to prevent deadlock
 
-### 1. Basic Message Sending - COMPLETELY BROKEN
-- **Status**: Messages don't even show up when sent
-- **Error**: `HTTP 500: Internal Server Error` from useMessaging.ts:294
-- **Impact**: Core functionality is dead - can't send any messages at all
-- **Location**: useMessaging.ts:155 in sendStreamingMessage function
+### 3. **Planning → Execution Transition** ✅
+- **Trigger**: Magic phrase automatically detected by Claude Code natural language mapping
+- **Process**: 
+  1. Updates session mode: planning → execution
+  2. Schedules `/clear` command (10 seconds)
+  3. Schedules execution prompt (15 seconds)  
+  4. Backend handles delayed execution while script exits
+- **Fresh Context**: `/clear` actually works with proper timing, ensuring clean execution start
 
-### 2. Scroll Position Memory - COMPLETELY BROKEN  
-- **Status**: Switching between sessions always jumps to top
-- **Expected**: Remember scroll position per session
-- **Actual**: Always scrolls to top, never remembers anything
-- **Impact**: Unusable UX when managing multiple conversations
+### 4. **Voice-Optimized Planning Prompts** ✅
+- **Concise Responses**: Short, decision-focused prompts for screen-free users
+- **Plan Building**: Comprehensive planning stored in holler-sessions.json
+- **Context Management**: Clean conversation context without metadata bloat
 
-### 3. Session Status Indicators - MISSING
-- **Status**: All per-session indicators are gone
-- **Missing Features**:
-  - Loading spinners beside session buttons (when Claude is thinking)
-  - Ready/thinking status per session
-  - Last interaction timestamps
-- **Location**: Session sidebar (left panel)
-- **Impact**: No way to see which sessions are active/processing
+## 🚧 REMAINING CRITICAL COMPONENTS
 
-### 4. Session Isolation - BROKEN
-- **Status**: Sessions don't work independently 
-- **Issue**: Processing in one session blocks all sessions
-- **Expected**: Each session should work independently
+### 1. **Completion Detection System** 
+**PRIORITY: HIGH** - Core to the domino cycle workflow
 
-## Technical Debt from Refactor
+**Goal**: Detect when Claude finishes execution mode and automatically trigger planning mode
 
-### Files That Got Fucked Up
-- `useMessaging.ts` - HTTP 500 errors, broken message sending
-- `useSessionManager.ts` - Scroll position save/restore not working
-- Session sidebar components - Missing all status indicators
-- Message display - Messages not appearing
+**Implementation Needed**:
+```javascript
+// Monitor for Claude session completion
+function detectExecutionCompletion() {
+  // Listen for session stop/completion events
+  // Check: session.jarvisMode === true && session.mode === "execution"
+  // If true: trigger planning mode restart
+}
+```
 
-### What We Lost in Refactor
-1. **Working message sending** (now returns 500 errors)
-2. **Scroll position memory** (completely non-functional)
-3. **Session status indicators** (visual feedback gone)
-4. **Per-session timestamps** (removed during refactor)
-5. **Session isolation** (all sessions block each other)
+**Workflow**:
+1. **Monitor**: Listen for Claude session completion events
+2. **Check**: Is `jarvisMode: true` AND `mode: "execution"`?
+3. **Action**: Switch to planning mode + inject planning prompt
+4. **Cycle**: User can now voice-collaborate on next steps
 
-## Next Steps
-1. Use Playwright MCP to document the actual broken state
-2. Fix HTTP 500 error in message sending (priority 1)
-3. Rebuild scroll position memory system
-4. Restore session status indicators
-5. Fix session isolation
+### 2. **Text-to-Speech for Planning Mode**
+**PRIORITY: HIGH** - Essential for hands-free voice collaboration
 
-## Reality Check
-This refactor was supposed to make the code more maintainable but instead created a completely broken application. We need to acknowledge this disaster and systematically rebuild the missing functionality.
+**Goal**: Automatically read Claude's planning responses aloud
+
+**Implementation Needed**:
+```javascript
+// When Claude finishes response in planning mode
+function handlePlanningResponse() {
+  // Check: session.jarvisMode === true && session.mode === "planning"  
+  // If true: extract last message content
+  // Convert to speech: textToSpeech(message)
+}
+```
+
+**Workflow**:
+1. **Monitor**: Listen for Claude response completion
+2. **Check**: Is `jarvisMode: true` AND `mode: "planning"`?
+3. **Extract**: Get last message content (clean, no tool usage)
+4. **Speak**: Use TTS to read response aloud
+
+## 🎬 TARGET USER EXPERIENCE
+
+### **Complete Domino Cycle**:
+1. **Planning Mode**: User voice-collaborates with Claude, plan builds in holler-sessions.json
+2. **Magic Phrase**: "go to pound town claude code" → automatic execution trigger
+3. **Execution Mode**: Fresh context, one-shot implementation, no user interaction needed
+4. **Auto-Transition**: Completion detected → back to planning mode automatically
+5. **Voice Response**: Claude's planning response read aloud → cycle continues
+
+### **Voice-First Design**:
+- **No Screen Required**: User can walk around, think aloud, collaborate naturally
+- **Intelligent Transitions**: System handles all technical session management
+- **Fresh Context Cycles**: Each execution starts clean, avoiding token bloat
+- **Persistent Plans**: Context carries forward through cycles via holler-sessions.json
+
+## 🔧 REMAINING TECHNICAL CHALLENGES
+
+### **Event Detection**:
+- Hook into Claude Code session lifecycle events
+- Reliable completion detection (not just token streaming end)
+- Distinguish between pause vs. completion
+
+### **TTS Integration**:
+- Text-to-speech library integration (Web Speech API? External tool?)
+- Message content extraction and cleaning
+- Audio output management
+
+### **Error Handling**:
+- Failed execution detection
+- Session state recovery
+- Graceful degradation when components fail
+
+## 🎯 SUCCESS METRICS
+
+✅ **Magic phrase triggers execution** - WORKING  
+✅ **Context clears properly** - WORKING  
+✅ **Non-blocking job queue** - WORKING  
+🚧 **Execution → Planning auto-transition** - NEEDED  
+🚧 **TTS for planning responses** - NEEDED  
+
+**GOAL**: Complete hands-free development cycles with voice collaboration and automatic technical execution.

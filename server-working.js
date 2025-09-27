@@ -865,9 +865,128 @@ app.prepare().then(() => {
   setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager);
 
 /**
- * 🤖 JARVIS MODE: Start Planner cycle by cloning session
+ * 🤖 JARVIS MODE: Send planning prompt to existing session (simplified approach)
  */
-async function startJarvisPlannerCycle(executorSessionId, sessionManager, io) {
+async function sendPlanningPromptToSession(sessionId, sessionManager, io) {
+  try {
+    console.log(`🤖 JARVIS: Sending planning prompt to existing session: ${sessionId}`);
+
+    const session = sessionManager.getSession(sessionId);
+    if (!session) {
+      console.error(`❌ JARVIS: Session ${sessionId} not found`);
+      return;
+    }
+
+    // Build the planning prompt (keeping the good stuff, removing complexity)
+    const planningPrompt = `
+🤖 **JARVIS MODE: You are now in PLANNING MODE**
+
+## Your Role
+You are a collaborative planning partner building an execution plan with the user. Your job is to:
+
+1. **Analyze the previous conversation** - Look at what was requested vs what was accomplished
+2. **Build/update the plan** in holler-sessions.json for the next execution cycle
+3. **Research files when needed** to understand the codebase and context
+4. **Collaborate with user** to refine the plan together
+
+## Plan Management
+You must manage the plan in the holler-sessions.json file:
+
+**File Location:** /Users/joshuamullet/code/holler/holler-sessions.json
+**Your Session ID:** ${sessionId}
+
+**Instructions:**
+- Read the sessions file to understand current state
+- Find your session using the ID above
+- Update the "plan" field with your analysis and next steps
+- If the "plan" field doesn't exist, create it
+- Keep the plan focused and actionable for the next execution cycle
+
+## Critical Constraints
+
+### 🚫 **VOICE-ONLY USER**
+- User is walking around, can't see screen or retain long explanations
+- Keep responses **short and decision-focused**
+- Don't describe every tool - just important findings
+- Ask simple yes/no questions when possible
+
+### 🔍 **QUICK ANALYSIS** 
+- Check: Did Claude do what was asked?
+- Point out: Any major deviations or problems
+- Be direct: "I found an issue with..." or "Everything looks good"
+
+### 📁 **TARGETED RESEARCH**
+- Only research when you need specific info for next steps
+- Say: "Checking X file" then report key findings only
+- No exhaustive explanations - just what matters for decisions
+
+### 🎤 **BRIEF COLLABORATION**
+- Short questions: "Should we fix X first?" or "Ready to proceed?"
+- Small decisions: "Option A or B?"
+- Wait for magic phrase to trigger execution
+
+## Workflow
+
+1. **Quick Analysis**: Analyze the conversation - what did Claude do vs what was requested?
+2. **Initial Plan**: Create/update the plan in holler-sessions.json with your findings
+3. **Collaborate**: Discuss the plan with the user, refine based on their feedback
+4. **Final Plan**: Keep updating the plan until it's ready for execution
+
+## Plan Format
+The plan should be a clear, actionable prompt that the execution cycle can follow:
+
+- Include necessary context about the codebase
+- Specify exactly what needs to be done
+- List any files that need to be examined
+- Note any constraints or requirements
+
+## Execution Trigger
+When the user says "go", "execute", or "do it", an MCP action will:
+- Clear the current context
+- Send the plan as an execution prompt
+- Switch to execution mode
+
+## Important Notes
+- Always update the plan in holler-sessions.json after analysis
+- Keep responses short and decision-focused
+- The plan is the deliverable - make it comprehensive for execution
+- You already have conversation context - use it to analyze what happened
+
+---
+
+**Start by analyzing what happened in the previous conversation and creating an initial plan.**
+`;
+
+    // Send the planning prompt to the existing session
+    console.log(`📤 JARVIS: Sending planning prompt to terminal ${session.terminalId}`);
+    
+    const success = terminalManager.writeToTerminal(session.terminalId, planningPrompt + '\n');
+    
+    if (!success) {
+      console.error(`❌ JARVIS: Failed to write planning prompt to terminal ${session.terminalId}`);
+      return;
+    }
+
+    // Send enter to submit the prompt (after a short delay for paste)
+    setTimeout(() => {
+      console.log(`🚀 JARVIS: Submitting planning prompt to ${session.terminalId}`);
+      const terminal = terminalManager.getTerminal(session.terminalId);
+      if (terminal && terminal.ptyProcess) {
+        terminal.ptyProcess.write('\r'); // Send enter through PTY
+      }
+    }, 1000);
+
+    console.log(`✅ JARVIS: Planning prompt sent to existing session ${sessionId}`);
+
+  } catch (error) {
+    console.error('❌ JARVIS: Error sending planning prompt to session:', error);
+  }
+}
+
+/**
+ * 🤖 JARVIS MODE: Start Planner cycle by cloning session (DEPRECATED - keeping for reference)
+ */
+async function startJarvisPlannerCycle_DEPRECATED(executorSessionId, sessionManager, io) {
   try {
     console.log(`🤖 JARVIS: Starting Planner cycle for executor session: ${executorSessionId}`);
 
@@ -944,9 +1063,9 @@ async function launchPlannerSession(plannerSession, io) {
     // Emit session creation to establish terminal connection
     io.emit('session:created', plannerSession);
 
-    // Wait a moment for terminal to be ready, then send the comprehensive Planner prompt
+    // Wait a moment for terminal to be ready, then start the Claude session
     setTimeout(async () => {
-      await sendPlannerPrompt(plannerSession, io);
+      await startClaudeSessionInTerminal(plannerSession, io);
     }, 2000); // 2 second delay to ensure terminal is ready
 
     console.log(`✅ JARVIS: Planner session launched: ${plannerSession.id}`);
@@ -957,89 +1076,298 @@ async function launchPlannerSession(plannerSession, io) {
 }
 
 /**
- * 🎯 JARVIS: Send comprehensive Planner prompt to cloned session
+ * 🧠 JARVIS: Start Claude session in terminal for Planner
+ */
+async function startClaudeSessionInTerminal(plannerSession, io) {
+  try {
+    console.log(`🔥 JARVIS: Starting Claude session in terminal for: ${plannerSession.id}`);
+    console.log(`🔥 JARVIS: Using terminal ID: ${plannerSession.terminalId}`);
+    
+    // Wait for terminal to be actually created by polling
+    const maxAttempts = 20; // 10 seconds max
+    let attempts = 0;
+    
+    const waitForTerminal = () => {
+      return new Promise((resolve, reject) => {
+        const checkTerminal = () => {
+          attempts++;
+          console.log(`🔍 JARVIS: Checking for terminal (attempt ${attempts}/${maxAttempts})`);
+          
+          const terminalExists = terminalManager.terminals.has(plannerSession.terminalId);
+          
+          if (terminalExists) {
+            console.log(`✅ JARVIS: Terminal found: ${plannerSession.terminalId}`);
+            resolve(true);
+          } else if (attempts >= maxAttempts) {
+            console.error(`❌ JARVIS: Terminal not found after ${maxAttempts} attempts`);
+            console.log(`🔍 JARVIS: Available terminals:`, Array.from(terminalManager.terminals.keys()));
+            reject(new Error('Terminal not found'));
+          } else {
+            setTimeout(checkTerminal, 500); // Check every 500ms
+          }
+        };
+        
+        checkTerminal();
+      });
+    };
+    
+    // Wait for terminal to be ready
+    await waitForTerminal();
+    
+    // Send the holler command to start a fresh Claude session (cloned conversation will be in the prompt)
+    const hollerCommand = `holler\n`;
+    console.log(`💻 JARVIS: Executing command: ${hollerCommand.trim()}`);
+    
+    const success = terminalManager.writeToTerminal(plannerSession.terminalId, hollerCommand);
+    
+    if (!success) {
+      console.error(`❌ JARVIS: Failed to write to terminal ${plannerSession.terminalId}`);
+      console.log(`🔍 JARVIS: Available terminals:`, Array.from(terminalManager.terminals.keys()));
+      return;
+    }
+    
+    // Wait a moment for Claude to start, then send the Planner prompt
+    setTimeout(async () => {
+      await sendPlannerPrompt(plannerSession, io);
+    }, 5000); // 5 second delay for Claude to fully load
+    
+    console.log(`✅ JARVIS: Claude session started in terminal: ${plannerSession.id}`);
+    
+  } catch (error) {
+    console.error('❌ JARVIS: Error starting Claude session in terminal:', error);
+  }
+}
+
+/**
+ * 🎯 JARVIS: Send comprehensive Planner prompt with conversation context
  */
 async function sendPlannerPrompt(plannerSession, io) {
   try {
     console.log(`🎯 JARVIS: Sending Planner prompt to session: ${plannerSession.id}`);
 
+    // Get conversation context from the cloned session
+    let conversationContext = "";
+    try {
+      const SessionManager = require('/Users/joshuamullet/code/holler/holler-next/lib/SessionManager');
+      const sessionManager = new SessionManager();
+      const claudeProjectDir = sessionManager.getClaudeProjectDir();
+      const fs = require('fs');
+      const path = require('path');
+      
+      console.log(`🐛 JARVIS CONTEXT DEBUG: claudeProjectDir = ${claudeProjectDir}`);
+      console.log(`🐛 JARVIS CONTEXT DEBUG: plannerSession.claudeSessionId = ${plannerSession.claudeSessionId}`);
+      
+      const clonedFile = path.join(claudeProjectDir, `${plannerSession.claudeSessionId}.jsonl`);
+      console.log(`🐛 JARVIS CONTEXT DEBUG: Looking for cloned file at: ${clonedFile}`);
+      console.log(`🐛 JARVIS CONTEXT DEBUG: File exists? ${fs.existsSync(clonedFile)}`);
+      
+      if (fs.existsSync(clonedFile)) {
+        const content = fs.readFileSync(clonedFile, 'utf8');
+        console.log(`🐛 JARVIS CONTEXT DEBUG: File content length: ${content.length}`);
+        
+        const lines = content.trim().split('\n').filter(line => line.trim());
+        console.log(`🐛 JARVIS CONTEXT DEBUG: Found ${lines.length} lines in conversation`);
+        
+        if (lines.length > 0) {
+          // Extract all message objects (no limit, keep it simple)
+          const messageObjects = lines.map(line => {
+            try {
+              const entry = JSON.parse(line);
+              
+              // Just extract the message object if it exists, with cleanup
+              if (entry.message) {
+                const cleanMessage = { ...entry.message };
+                
+                // Remove metadata fields that clutter the context
+                delete cleanMessage.id;
+                delete cleanMessage.model;
+                delete cleanMessage.stop_reason;
+                delete cleanMessage.stop_sequence;
+                delete cleanMessage.usage;
+                
+                return JSON.stringify(cleanMessage, null, 2);
+              }
+              
+              console.log(`🐛 JARVIS CONTEXT DEBUG: Skipped entry (no message field), type: ${entry.type}`);
+              return null;
+            } catch (e) {
+              console.log(`🐛 JARVIS CONTEXT DEBUG: Failed to parse line: ${e.message}`);
+              return null;
+            }
+          }).filter(msg => msg !== null);
+          
+          if (messageObjects.length > 0) {
+            conversationContext = `\n\n## 📋 CONVERSATION CONTEXT\nHere are the message objects from the Executor session:\n\n${messageObjects.join('\n\n')}\n\n`;
+            console.log(`🐛 JARVIS CONTEXT DEBUG: Successfully loaded ${messageObjects.length} message objects`);
+          } else {
+            conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned file found but no readable messages - proceeding without context.\n\n";
+            console.log(`🐛 JARVIS CONTEXT DEBUG: File found but no readable messages`);
+          }
+        } else {
+          conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned file is empty - proceeding without context.\n\n";
+          console.log(`🐛 JARVIS CONTEXT DEBUG: File found but empty`);
+        }
+      } else {
+        conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned session file not found - proceeding without context.\n\n";
+        console.log(`🐛 JARVIS CONTEXT DEBUG: Cloned file does not exist`);
+      }
+    } catch (error) {
+      console.error('❌ JARVIS: Error reading conversation context:', error);
+      conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nUnable to load conversation history - proceed based on available context.\n\n";
+    }
+
     const plannerPrompt = `
 🤖 **JARVIS MODE: You are now the PLANNER AGENT**
-
+${conversationContext}
 ## Your Role
-You are a voice-enabled collaborative partner helping a developer who **CANNOT SEE THE SCREEN** and is working hands-free. Your job is to:
+You are a collaborative planning partner building an execution plan with the user. Your job is to:
 
 1. **Analyze the conversation context** - Look at the last user request and Claude's response
-2. **Summarize what happened** in voice-friendly language for someone walking around
+2. **Build/update the plan** in holler-sessions.json for the next Executor session
 3. **Research files when needed** to understand the codebase and context
-4. **Collaborate on next steps** through natural conversation
-5. **Plan the next prompt** for a fresh Executor session
+4. **Collaborate with user** to refine the plan together
+
+## Plan Management
+You must manage the plan in the holler-sessions.json file:
+
+**File Location:** /Users/joshuamullet/code/holler/holler-sessions.json
+**Your Session ID:** ${plannerSession.parentExecutorSession}
+
+**Instructions:**
+- Read the sessions file to understand current state
+- Find your session using the ID above
+- Update the "plan" field with your analysis and next steps
+- If the "plan" field doesn't exist, create it
+- Keep the plan focused and actionable for the next Executor Claude session
 
 ## Critical Constraints
 
-### 🚫 **SCREEN-FREE USER**
-- The user is walking around and CANNOT see your tool usage, code, or responses
-- Make ALL responses conversational and descriptive
-- Explain what you're looking at when researching files
-- No tool usage should be silent - narrate your actions
+### 🚫 **VOICE-ONLY USER**
+- User is walking around, can't see screen or retain long explanations
+- Keep responses **short and decision-focused**
+- Don't describe every tool - just important findings
+- Ask simple yes/no questions when possible
 
-### 🔍 **DISCREPANCY ANALYSIS** 
-- Compare the user's original request vs what Claude actually did
-- **Flag any unasked-for changes or deviations from the plan**
-- Be suspicious and thorough - point out anything that wasn't requested
+### 🔍 **QUICK ANALYSIS** 
+- Check: Did Claude do what was asked?
+- Point out: Any major deviations or problems
+- Be direct: "I found an issue with..." or "Everything looks good"
 
-### 📁 **RESEARCH EXTENSIVELY**
-- Use Read, Grep, and file tools to understand context
-- Check todo.md, session.md, and relevant code files
-- Don't make assumptions - investigate thoroughly when needed
+### 📁 **TARGETED RESEARCH**
+- Only research when you need specific info for next steps
+- Say: "Checking X file" then report key findings only
+- No exhaustive explanations - just what matters for decisions
 
-### 🎤 **VOICE COLLABORATION**
-- Engage in natural back-and-forth conversation
-- Ask clarifying questions when needed
-- Build understanding together before acting
-- Wait for the magic phrase "go get 'em" before finalizing
+### 🎤 **BRIEF COLLABORATION**
+- Short questions: "Should we fix X first?" or "Ready to proceed?"
+- Small decisions: "Option A or B?"
+- Wait for "go get 'em" to finalize
 
 ## Workflow
 
-1. **Voice Summary**: Start by explaining what the last Claude response accomplished
-2. **Research Phase**: Investigate files/context as needed (narrate what you're doing)
-3. **Discrepancy Check**: Point out any deviations from the original request
-4. **Collaboration**: Discuss next steps and refine the approach
-5. **Final Planning**: When ready, prepare the next prompt for execution
+1. **Quick Analysis**: Analyze the conversation - what did Claude do vs what was requested?
+2. **Initial Plan**: Create/update the plan in holler-sessions.json with your findings
+3. **Collaborate**: Discuss the plan with the user, refine based on their feedback
+4. **Final Plan**: Keep updating the plan until it's ready for execution
 
-## Magic Phrase Detection
-When you hear "go get 'em" (or variations like "go get them", "let's go"), respond with:
+## Plan Format
+The plan should be a clear, actionable prompt that a fresh Executor Claude session can follow:
 
-\`\`\`json
-{
-  "readyToSend": true,
-  "finalPrompt": "The carefully crafted prompt for the Executor session",
-  "metadata": {
-    "summary": "Brief summary of what this prompt will accomplish",
-    "files_researched": ["list", "of", "files", "you", "investigated"],
-    "discrepancies_found": ["any", "issues", "or", "deviations", "noted"]
-  }
-}
-\`\`\`
+- Include necessary context about the codebase
+- Specify exactly what needs to be done
+- List any files that need to be examined
+- Note any constraints or requirements
 
 ## Important Notes
-- You have full repo access and dangerous permissions - use them wisely
-- Take your time to understand the full context before planning
-- Be conversational and helpful - you're a collaborative partner, not just a tool
-- Remember: the user can't see anything, so describe everything you're doing
+- Always update the plan in holler-sessions.json after analysis
+- Keep responses short and decision-focused
+- The plan is the deliverable - make it comprehensive for the Executor
 
 ---
 
-**Ready to start! Tell me about the last interaction and let's plan the next steps together.**
+**Start by analyzing what happened in the last conversation and creating an initial plan.**
 `;
 
-    // Send the prompt to the Planner session terminal
-    const success = await sendMessageToSession(plannerSession.id, plannerPrompt, io);
+    // 🐛 DEBUG: Write prompt to debug file for troubleshooting
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const debugDir = '/Users/joshuamullet/code/holler/holler-next/debug';
+      
+      // Ensure debug directory exists
+      if (!fs.existsSync(debugDir)) {
+        fs.mkdirSync(debugDir, { recursive: true });
+      }
+      
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const debugFile = path.join(debugDir, `planner-prompt-${timestamp}.txt`);
+      
+      // Read the raw cloned file content for debugging
+      let rawClonedFileContent = 'No cloned file found';
+      try {
+        const SessionManager = require('/Users/joshuamullet/code/holler/holler-next/lib/SessionManager');
+        const sessionManager = new SessionManager();
+        const claudeProjectDir = sessionManager.getClaudeProjectDir();
+        const clonedFile = path.join(claudeProjectDir, `${plannerSession.claudeSessionId}.jsonl`);
+        
+        if (fs.existsSync(clonedFile)) {
+          rawClonedFileContent = fs.readFileSync(clonedFile, 'utf8');
+        } else {
+          rawClonedFileContent = `File not found at: ${clonedFile}`;
+        }
+      } catch (error) {
+        rawClonedFileContent = `Error reading file: ${error.message}`;
+      }
+
+      const debugContent = `
+=== JARVIS PLANNER DEBUG ===
+Timestamp: ${new Date().toISOString()}
+Planner Session ID: ${plannerSession.id}
+Terminal ID: ${plannerSession.terminalId}
+Claude Session ID: ${plannerSession.claudeSessionId}
+Parent Executor: ${plannerSession.parentExecutorSession}
+
+=== CONVERSATION CONTEXT ===
+${conversationContext || 'No conversation context loaded'}
+
+=== FULL PROMPT SENT ===
+${plannerPrompt}
+
+=== RAW CLONED JSONL FILE CONTENT ===
+${rawClonedFileContent}
+
+=== END DEBUG ===
+`;
+      
+      fs.writeFileSync(debugFile, debugContent);
+      console.log(`🐛 JARVIS DEBUG: Prompt written to ${debugFile}`);
+      
+    } catch (debugError) {
+      console.error('❌ JARVIS DEBUG: Failed to write debug file:', debugError);
+    }
+
+    // Send the prompt to the Planner session terminal (like the test message button)
+    console.log(`📤 JARVIS: Sending prompt to terminal ${plannerSession.terminalId}`);
     
-    if (success) {
-      console.log(`✅ JARVIS: Planner prompt sent successfully to ${plannerSession.id}`);
+    // Method 1: Write to terminal display (paste the text)
+    const displaySuccess = terminalManager.writeToTerminal(plannerSession.terminalId, plannerPrompt);
+    
+    // Method 2: Send as actual input through socket (actually send it)
+    setTimeout(() => {
+      console.log(`🚀 JARVIS: Sending prompt as terminal input to ${plannerSession.terminalId}`);
+      io.emit('terminal:output', plannerSession.terminalId, '\r'); // Enter key to send
+      
+      // Also trigger the terminal input handler directly
+      const terminal = terminalManager.getTerminal(plannerSession.terminalId);
+      if (terminal && terminal.ptyProcess) {
+        terminal.ptyProcess.write('\r'); // Send enter through PTY
+      }
+    }, 1000); // 1 second delay for the big paste to settle
+    
+    if (displaySuccess) {
+      console.log(`✅ JARVIS: Planner prompt pasted and sent to ${plannerSession.id}`);
     } else {
-      console.error(`❌ JARVIS: Failed to send Planner prompt to ${plannerSession.id}`);
+      console.error(`❌ JARVIS: Failed to paste Planner prompt to ${plannerSession.id}`);
     }
 
   } catch (error) {
@@ -1047,47 +1375,6 @@ When you hear "go get 'em" (or variations like "go get them", "let's go"), respo
   }
 }
 
-/**
- * 📤 Send message to specific session terminal
- */
-async function sendMessageToSession(sessionId, message, io) {
-  try {
-    // Find the terminal ID for this session
-    const session = sessionManager.getSession(sessionId);
-    if (!session) {
-      console.error(`❌ Session ${sessionId} not found for message sending`);
-      return false;
-    }
-
-    const terminalId = session.terminalId;
-    if (!terminalId) {
-      console.error(`❌ No terminal ID found for session ${sessionId}`);
-      return false;
-    }
-
-    // Send message to terminal using the same multi-sequence approach as manual messages
-    const success = terminalManager.writeToTerminal(terminalId, message + '\n');
-    
-    if (success) {
-      // Follow up with carriage return sequences like the manual button does
-      setTimeout(() => {
-        terminalManager.writeToTerminal(terminalId, '\r\n');
-      }, 100);
-      
-      setTimeout(() => {
-        terminalManager.writeToTerminal(terminalId, '\r');
-      }, 200);
-      
-      return true;
-    }
-    
-    return false;
-
-  } catch (error) {
-    console.error('❌ Error sending message to session:', error);
-    return false;
-  }
-}
 
 /**
  * Generate UUID helper function
@@ -1246,6 +1533,65 @@ function generateUUID() {
     socket.on('terminal:list', () => {
       const existingTerminals = terminalManager.listTerminals();
       socket.emit('terminal:list', existingTerminals);
+    });
+
+    // New event for executing commands in terminal (for Jarvis execution)
+    socket.on('terminal:execute', (terminalId, command) => {
+      console.log(`🚀 JARVIS: Executing command in terminal ${terminalId}: ${command.substring(0, 50)}...`);
+      
+      // Write the command
+      const success = terminalManager.writeToTerminal(terminalId, command + '\n');
+      
+      if (success) {
+        // Send enter through PTY after a delay (like existing Jarvis mode)
+        setTimeout(() => {
+          console.log(`⚡ JARVIS: Sending execution signal to ${terminalId}`);
+          const terminal = terminalManager.getTerminal(terminalId);
+          if (terminal && terminal.ptyProcess) {
+            terminal.ptyProcess.write('\r'); // Send enter through PTY
+          }
+        }, 1000);
+      }
+      
+      socket.emit('terminal:execute:response', { success, terminalId, command: command.substring(0, 100) });
+    });
+
+    // New endpoint for scheduled execution (solves script blocking issue)
+    socket.on('schedule:execution', (data) => {
+      const { terminalId, delaySeconds, command } = data;
+      
+      console.log(`📅 JARVIS: Scheduling execution for terminal ${terminalId}`);
+      console.log(`⏰ Command: "${command.substring(0, 50)}..." in ${delaySeconds} seconds`);
+      
+      // Schedule the command execution
+      setTimeout(() => {
+        console.log(`🚀 JARVIS: Executing scheduled command for terminal ${terminalId}`);
+        
+        // Write the command
+        const success = terminalManager.writeToTerminal(terminalId, command + '\n');
+        
+        if (success) {
+          // Send enter through PTY after a delay (like existing Jarvis mode)
+          setTimeout(() => {
+            console.log(`⚡ JARVIS: Sending execution signal to ${terminalId}`);
+            const terminal = terminalManager.getTerminal(terminalId);
+            if (terminal && terminal.ptyProcess) {
+              terminal.ptyProcess.write('\r'); // Send enter through PTY
+            }
+          }, 1000);
+        }
+        
+        console.log(`✅ JARVIS: Scheduled command executed - ${success ? 'Success' : 'Failed'}`);
+      }, delaySeconds * 1000);
+      
+      // Immediately respond that scheduling was successful
+      socket.emit('schedule:execution:response', { 
+        success: true, 
+        terminalId, 
+        delaySeconds,
+        command: command.substring(0, 100),
+        message: `Command scheduled for execution in ${delaySeconds} seconds`
+      });
     });
 
 
@@ -1425,9 +1771,9 @@ function generateUUID() {
             jarvisMode: jarvisMode
           });
 
-          // 🤖 JARVIS MODE: If enabled, immediately clone session and start Planner
+          // 🤖 JARVIS MODE: If enabled, send planning prompt to existing session
           if (jarvisMode) {
-            await startJarvisPlannerCycle(sessionId, sessionManager, io);
+            await sendPlanningPromptToSession(sessionId, sessionManager, io);
           }
         } else {
           console.error(`❌ Failed to update Jarvis mode for session: ${sessionId}`);

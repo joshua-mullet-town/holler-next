@@ -4,9 +4,6 @@
   "private": true,
   "scripts": {
     "dev": "node server-working.js",
-    "dev-next": "next dev --turbopack",
-    "debug": "DEBUG=* NODE_OPTIONS='--inspect' next dev --port 3002 --turbopack",
-    "debug-verbose": "DEBUG=* NODE_OPTIONS='--inspect' next dev --port 3002 --turbopack | tee debug.log",
     "build": "next build",
     "start": "node server-working.js",
     "lint": "next lint"

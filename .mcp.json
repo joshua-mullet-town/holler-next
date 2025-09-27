@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jarvis-executor": {
+      "command": "/Users/joshuamullet/code/holler/holler-next/mcp-servers/jarvis-executor/venv/bin/python",
+      "args": ["/Users/joshuamullet/code/holler/holler-next/mcp-servers/jarvis-executor/server.py"],
+      "env": {}
+    }
+  }
+}
