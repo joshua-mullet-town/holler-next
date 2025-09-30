@@ -8,8 +8,8 @@
 
 ### 1. **Jarvis Mode Toggle & Session Management** ✅
 - **UI Toggle**: Replaced autonomous mode with Jarvis Mode toggle (🤖 blue glow)
-- **Session State**: Added `jarvisMode: boolean` and `mode: "planning"|"execution"` to holler-sessions.json
-- **Plan Storage**: Added `plan` field for persistent plan management across cycles
+- **Session State**: Added `jarvisMode: boolean` and `mode: "planning"|"execution"` to SQLite sessions table  
+- **Plan Storage**: Persistent plan management in SQLite sessions table
 
 ### 2. **Magic Phrase Execution System** ✅
 - **Natural Language Mapping**: "go to pound town claude code" → `/execute-plan` via CLAUDE.md
@@ -27,57 +27,150 @@
 
 ### 4. **Voice-Optimized Planning Prompts** ✅
 - **Concise Responses**: Short, decision-focused prompts for screen-free users
-- **Plan Building**: Comprehensive planning stored in holler-sessions.json
+- **Plan Building**: Comprehensive planning stored in SQLite sessions table
 - **Context Management**: Clean conversation context without metadata bloat
 
 ## 🚧 REMAINING CRITICAL COMPONENTS
 
-### 1. **Completion Detection System** 
-**PRIORITY: HIGH** - Core to the domino cycle workflow
+### 1. **Completion Detection System** ✅ FULLY WORKING!
+**PRIORITY: HIGH** - Core to the domino cycle workflow *(✅ COMPLETE)*
 
-**Goal**: Detect when Claude finishes execution mode and automatically trigger planning mode
+**🎉 BREAKTHROUGH ACHIEVED**: Execution → Planning auto-transition is now working!
 
-**Implementation Needed**:
+**Implementation Complete**:
 ```javascript
-// Monitor for Claude session completion
-function detectExecutionCompletion() {
-  // Listen for session stop/completion events
-  // Check: session.jarvisMode === true && session.mode === "execution"
-  // If true: trigger planning mode restart
+// ✅ WORKING: Monitor for Claude session completion
+fileMonitor.on('stop', (event) => {
+  // ✅ WORKING: Check execution mode completion
+  if (hollerSession && hollerSession.jarvisMode && hollerSession.mode === 'execution') {
+    handleJarvisExecutionCompletion(hollerSession, event, io, terminalManager);
+  }
+});
+
+// ✅ WORKING: Switch to planning mode + inject prompt
+async function handleJarvisExecutionCompletion(hollerSession, event, io, terminalManager) {
+  // 1. Update session mode: execution → planning
+  session.mode = 'planning';
+  sessionManager.updateSessionMode(session.id, 'planning');
+  
+  // 2. Inject planning prompt after 2-second delay
+  setTimeout(() => injectPlanningPrompt(hollerSession, terminalManager), 2000);
 }
 ```
 
-**Workflow**:
-1. **Monitor**: Listen for Claude session completion events
-2. **Check**: Is `jarvisMode: true` AND `mode: "execution"`?
-3. **Action**: Switch to planning mode + inject planning prompt
-4. **Cycle**: User can now voice-collaborate on next steps
+**Auto-Transition Workflow** (✅ Working):
+1. **Monitor**: Listen for Claude session completion events (✅ WORKING)
+2. **Check**: Is `jarvisMode: true` AND `mode: "execution"`? (✅ WORKING)  
+3. **Action**: Switch to planning mode + inject planning prompt (✅ WORKING)
+4. **Cycle**: User can now voice-collaborate on next steps (✅ WORKING)
 
-### 2. **Text-to-Speech for Planning Mode**
-**PRIORITY: HIGH** - Essential for hands-free voice collaboration
+**Planning Prompt Injection**:
+- **Content**: Contextual prompt with execution summary and next steps
+- **Delivery**: Automatically sent to terminal to trigger Claude response
+- **Voice-Ready**: Response will be read aloud via TTS system
 
-**Goal**: Automatically read Claude's planning responses aloud
+### 2. **Text-to-Speech for Planning Mode** ✅ FULLY WORKING!
+**PRIORITY: HIGH** - Essential for hands-free voice collaboration *(✅ COMPLETE)*
 
-**Implementation Needed**:
+**🎉 BREAKTHROUGH ACHIEVED**: TTS is now working end-to-end! Key discoveries:
+
+**HAPPY ACCIDENT**: System captures **every** assistant message, not just final responses! This provides:
+- **Immediate feedback** for each Claude response part
+- **Better conversational flow** - user hears Claude's thinking as it progresses  
+- **More responsive voice collaboration** vs waiting for complete responses
+
+**What We Fixed**:
+1. **Server Crashes**: Removed broken duplicate code in server-working.js that caused crashes on message send
+2. **Session Correlation**: Manual session ID correlation works - system finds correct Holler session for Claude session
+3. **React State Timing**: Fixed React state race condition using useRef + useState pattern
+4. **TTS Manager Initialization**: Enhanced dynamic import with robust fallback system
+5. **Performance**: Removed right panel file I/O overhead that was causing slowdowns
+
+**Critical Technical Solution - React State Timing Issue**:
 ```javascript
-// When Claude finishes response in planning mode
-function handlePlanningResponse() {
-  // Check: session.jarvisMode === true && session.mode === "planning"  
-  // If true: extract last message content
-  // Convert to speech: textToSpeech(message)
+// PROBLEM: React state updates are async, socket events fired before TTS manager was available
+// SOLUTION: Use useRef for immediate access + useState for React lifecycle
+const [ttsManager, setTtsManager] = useState<any>(null);
+const ttsManagerRef = useRef<any>(null);
+
+// Set both immediately during initialization
+setTtsManager(ttsInstance);
+ttsManagerRef.current = ttsInstance;
+
+// Use ref in socket handlers for immediate access
+const activeTtsManager = ttsManagerRef.current || ttsManager;
+```
+
+**Backend Pipeline** (✅ Working):
+```javascript
+// 1. File monitor detects Claude 'stop' events (✅ WORKING)
+// 2. Find Holler session by Claude ID (✅ WORKING)  
+// 3. Check: session.jarvisMode === true && session.mode === "planning" (✅ WORKING)
+// 4. Extract assistant message with type: "text" only (✅ WORKING)
+// 5. Emit 'jarvis-tts' socket event to frontend (✅ WORKING)
+```
+
+**Frontend Pipeline** (✅ Working):
+```javascript  
+// 1. Receive 'jarvis-tts' socket event (✅ WORKING)
+// 2. Find session and verify Jarvis mode (✅ WORKING)
+// 3. Auto-enable TTS manager if needed (✅ WORKING)
+// 4. Queue message for speech synthesis (✅ WORKING)
+// 5. Web Speech API speaks the message (✅ WORKING)
+```
+
+**Message Extraction Rules**:
+- **Target**: Every assistant message (not just final ones)
+- **Content Type**: Text content only (skip tool usage, thinking, etc.)
+- **Scope**: Current message being processed (example: individual responses in multi-part Claude replies)
+- **Filter Out**: Tool descriptions, file paths, code snippets in speech
+
+**TTS Implementation - Web Speech API Research**:
+- **Technology**: Web Speech API SpeechSynthesis (built into modern browsers)
+- **Browser Support**: Chrome, Edge, Safari (excellent support in 2025)
+- **Text Limit**: 32,767 characters maximum per utterance
+- **Voice Settings**: Default system voice initially (getVoices() for future customization)
+- **User Control**: Always auto-speak for Jarvis planning mode
+- **Interrupt**: cancel() method available (future feature)
+
+**Implementation Code Pattern**:
+```javascript
+// Browser support check
+if ('speechSynthesis' in window) {
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.0;     // Normal speed
+  utterance.volume = 1.0;   // Full volume
+  utterance.pitch = 1.0;    // Normal pitch
+  
+  // Event handlers
+  utterance.onstart = () => console.log('Speech started');
+  utterance.onend = () => console.log('Speech ended');
+  utterance.onerror = (error) => console.error('Speech error:', error);
+  
+  // Speak the text
+  window.speechSynthesis.speak(utterance);
+} else {
+  throw new Error('Speech synthesis not supported');
 }
 ```
 
+**Error Handling**:
+- **No Message Found**: Log error, continue silently
+- **TTS Not Available**: Log error to console with timestamp
+- **Unexpected Errors**: Log to console for debugging
+- **Format**: `{ error: "TTS failed", timestamp: "...", details: "..." }`
+
 **Workflow**:
-1. **Monitor**: Listen for Claude response completion
+1. **Monitor**: Listen for 'stop' event completion
 2. **Check**: Is `jarvisMode: true` AND `mode: "planning"`?
-3. **Extract**: Get last message content (clean, no tool usage)
-4. **Speak**: Use TTS to read response aloud
+3. **Extract**: Get last assistant text message (clean content)
+4. **Speak**: Use Web Speech API to read response aloud
+5. **Debug**: Log errors to console for joint debugging
 
 ## 🎬 TARGET USER EXPERIENCE
 
 ### **Complete Domino Cycle**:
-1. **Planning Mode**: User voice-collaborates with Claude, plan builds in holler-sessions.json
+1. **Planning Mode**: User voice-collaborates with Claude, plan builds in SQLite
 2. **Magic Phrase**: "go to pound town claude code" → automatic execution trigger
 3. **Execution Mode**: Fresh context, one-shot implementation, no user interaction needed
 4. **Auto-Transition**: Completion detected → back to planning mode automatically
@@ -87,7 +180,7 @@ function handlePlanningResponse() {
 - **No Screen Required**: User can walk around, think aloud, collaborate naturally
 - **Intelligent Transitions**: System handles all technical session management
 - **Fresh Context Cycles**: Each execution starts clean, avoiding token bloat
-- **Persistent Plans**: Context carries forward through cycles via holler-sessions.json
+- **Persistent Plans**: Context carries forward through cycles via SQLite
 
 ## 🔧 REMAINING TECHNICAL CHALLENGES
 
@@ -111,7 +204,9 @@ function handlePlanningResponse() {
 ✅ **Magic phrase triggers execution** - WORKING  
 ✅ **Context clears properly** - WORKING  
 ✅ **Non-blocking job queue** - WORKING  
-🚧 **Execution → Planning auto-transition** - NEEDED  
-🚧 **TTS for planning responses** - NEEDED  
+✅ **Execution → Planning auto-transition** - WORKING  
+✅ **TTS for planning responses** - WORKING  
 
-**GOAL**: Complete hands-free development cycles with voice collaboration and automatic technical execution.
+**🎉 GOAL ACHIEVED**: Complete hands-free development cycles with voice collaboration and automatic technical execution are now fully functional!
+
+**CORE DOMINO CYCLE**: Planning → Magic Phrase → Execution → Auto-Transition → Planning (with TTS)

@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+mcp-servers/jarvis-executor/node_modules
+mcp-servers/jarvis-executor/venv
 /.pnp
 .pnp.*
 .yarn/*

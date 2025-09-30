@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "jarvis-executor-v2": {
+      "type": "stdio",
+      "command": "/Users/joshuamullet/code/holler/holler-next/mcp-servers/jarvis-executor/venv/bin/python",
+      "args": ["/Users/joshuamullet/code/holler/holler-next/mcp-servers/jarvis-executor/server_v2.py"],
+      "description": "Jarvis execution phrase detection and /execute-plan command triggering"
+    }
+  }
+}

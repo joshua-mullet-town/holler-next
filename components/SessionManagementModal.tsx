@@ -63,7 +63,7 @@ export default function SessionManagementModal({
         setAvailableDirectories(data.directories);
       }
     } catch (error) {
-      console.error('Failed to load directories:', error);
+      // Failed to load directories
     }
   };
 
@@ -82,7 +82,7 @@ export default function SessionManagementModal({
       }
     } catch (err) {
       setError('Network error loading sessions');
-      console.error('Failed to load discovered sessions:', err);
+      // Failed to load discovered sessions
     } finally {
       setLoading(false);
     }
@@ -144,7 +144,6 @@ export default function SessionManagementModal({
       const data = await response.json();
       
       if (data.success) {
-        console.log('✅ Session promoted successfully:', data.session);
         onSessionCreated(data.session);
         onClose();
         // Reset state
@@ -155,7 +154,7 @@ export default function SessionManagementModal({
         alert(data.error || 'Failed to promote session');
       }
     } catch (err) {
-      console.error('Failed to promote session:', err);
+      // Failed to promote session
       alert('Network error promoting session');
     } finally {
       setPromotingSessionId(null);

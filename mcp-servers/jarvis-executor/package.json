@@ -1,0 +1,12 @@
+{
+  "name": "jarvis-executor-mcp",
+  "version": "1.0.0",
+  "description": "Jarvis Mode execution MCP server",
+  "main": "mcp-server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.2"
+  },
+  "scripts": {
+    "start": "node mcp-server.js"
+  }
+}

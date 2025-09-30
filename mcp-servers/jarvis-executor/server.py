@@ -12,7 +12,7 @@ This MCP server provides tools that Claude automatically invokes when:
 
 import asyncio
 import json
-import os
+import requests
 import re
 from typing import Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("jarvis-executor")
 
 # Constants
-SESSIONS_FILE = "/Users/joshuamullet/code/holler/holler-sessions.json"
+HOLLER_API_BASE = "http://localhost:3002/api"
 MAGIC_PHRASE = "go to pound town claude code"
 
 @mcp.tool()
@@ -30,7 +30,7 @@ async def detect_magic_phrase(text: str) -> Dict[str, Any]:
     
     When this exact phrase is detected, this tool will:
     1. Clear the current session context (/clear)
-    2. Change session mode from planning to execution in holler-sessions.json
+    2. Change session mode from planning to execution in SQLite
     3. Inject the execution prompt to start implementation
     
     Args:
@@ -98,7 +98,7 @@ async def detect_magic_phrase(text: str) -> Dict[str, Any]:
 async def execute_plan(session_id: str) -> Dict[str, Any]:
     """Execute the plan for a Jarvis session.
     
-    Reads the plan from holler-sessions.json, updates mode to execution,
+    Reads the plan from SQLite, updates mode to execution,
     and triggers context clearing + execution prompt.
     
     Args:
@@ -111,36 +111,30 @@ async def execute_plan(session_id: str) -> Dict[str, Any]:
     try:
         print(f"🚀 JARVIS: Starting plan execution for session {session_id}")
         
-        # Read current sessions file
-        sessions_data = await read_sessions_file()
-        if not sessions_data:
-            return {"success": False, "error": "Could not read sessions file"}
+        # Get session from SQLite API
+        session_response = requests.get(f"{HOLLER_API_BASE}/sessions/{session_id}")
+        if session_response.status_code != 200:
+            return {"success": False, "error": f"Could not fetch session {session_id}"}
         
-        # Find the target session
-        target_session = None
-        for session in sessions_data.get("sessions", []):
-            if session.get("id") == session_id:
-                target_session = session
-                break
+        session = session_response.json()
         
-        if not target_session:
-            return {"success": False, "error": f"Session {session_id} not found"}
-        
-        if not target_session.get("jarvisMode"):
+        if not session.get("jarvisMode"):
             return {"success": False, "error": f"Session {session_id} is not in Jarvis mode"}
         
         # Get the plan
-        plan = target_session.get("plan", "")
+        plan = session.get("plan", "")
         if not plan:
             return {"success": False, "error": "No plan found for execution"}
         
         print(f"📋 JARVIS: Plan to execute: {plan[:200]}...")
         
-        # Update session mode to execution
-        target_session["mode"] = "execution"
+        # Update session mode to execution via API
+        update_response = requests.put(f"{HOLLER_API_BASE}/sessions/{session_id}/mode", 
+                                     json={"mode": "execution"})
         
-        # Save updated sessions
-        await write_sessions_file(sessions_data)
+        if update_response.status_code != 200:
+            return {"success": False, "error": "Failed to update session mode"}
+        
         print(f"✅ JARVIS: Updated session {session_id} mode to 'execution'")
         
         # Build execution prompt with ultra-think instructions
@@ -176,9 +170,6 @@ Execute the following plan completely and thoroughly:
 **BEGIN EXECUTION NOW - ULTRA-THINK AND IMPLEMENT THE PLAN**
 """
 
-        # Note: Context clearing and prompt injection would be handled by Claude Code
-        # This tool provides the execution prompt and session management
-        
         return {
             "success": True,
             "session_id": session_id,
@@ -206,20 +197,23 @@ async def get_active_jarvis_session() -> Optional[Dict[str, Any]]:
     """
     
     try:
-        sessions_data = await read_sessions_file()
-        if not sessions_data:
+        # Get all sessions from SQLite API
+        sessions_response = requests.get(f"{HOLLER_API_BASE}/sessions")
+        if sessions_response.status_code != 200:
             return None
         
-        # Find active session that has Jarvis mode enabled
+        sessions_data = sessions_response.json()
+        sessions = sessions_data.get("sessions", [])
         active_session_id = sessions_data.get("activeSessionId")
         
-        for session in sessions_data.get("sessions", []):
+        # Find active session that has Jarvis mode enabled
+        for session in sessions:
             if (session.get("id") == active_session_id and 
                 session.get("jarvisMode") == True):
                 return session
         
         # Fallback: find any Jarvis session
-        for session in sessions_data.get("sessions", []):
+        for session in sessions:
             if session.get("jarvisMode") == True:
                 return session
         
@@ -242,52 +236,19 @@ async def update_session_mode(session_id: str, mode: str) -> Dict[str, Any]:
     """
     
     try:
-        sessions_data = await read_sessions_file()
-        if not sessions_data:
-            return {"success": False, "error": "Could not read sessions file"}
+        # Update session mode via API
+        response = requests.put(f"{HOLLER_API_BASE}/sessions/{session_id}/mode", 
+                              json={"mode": mode})
         
-        # Find and update the session
-        updated = False
-        for session in sessions_data.get("sessions", []):
-            if session.get("id") == session_id:
-                session["mode"] = mode
-                updated = True
-                break
-        
-        if updated:
-            await write_sessions_file(sessions_data)
+        if response.status_code == 200:
             print(f"✅ JARVIS: Updated session {session_id} mode to '{mode}'")
             return {"success": True, "session_id": session_id, "new_mode": mode}
         else:
-            return {"success": False, "error": f"Session {session_id} not found"}
+            return {"success": False, "error": f"API request failed with status {response.status_code}"}
         
     except Exception as e:
         print(f"❌ JARVIS: Error updating session mode: {str(e)}")
         return {"success": False, "error": str(e)}
-
-# Helper functions for file operations
-async def read_sessions_file() -> Optional[Dict[str, Any]]:
-    """Read and parse the holler-sessions.json file."""
-    try:
-        if not os.path.exists(SESSIONS_FILE):
-            print(f"❌ JARVIS: Sessions file not found: {SESSIONS_FILE}")
-            return None
-        
-        with open(SESSIONS_FILE, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"❌ JARVIS: Error reading sessions file: {str(e)}")
-        return None
-
-async def write_sessions_file(sessions_data: Dict[str, Any]) -> bool:
-    """Write sessions data back to the holler-sessions.json file."""
-    try:
-        with open(SESSIONS_FILE, 'w') as f:
-            json.dump(sessions_data, f, indent=2)
-        return True
-    except Exception as e:
-        print(f"❌ JARVIS: Error writing sessions file: {str(e)}")
-        return False
 
 @mcp.tool()
 async def get_current_plan() -> Dict[str, Any]:

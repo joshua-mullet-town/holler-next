@@ -272,6 +272,16 @@ class SessionManager {
         this.sessions.delete(sessionId);
         await this.saveSessions();
 
+        // 🔗 CLEANUP: Also remove correlation data
+        try {
+            const CorrelationManager = require('../../lib/CorrelationManager');
+            const correlationManager = new CorrelationManager();
+            correlationManager.removeCorrelation(sessionId);
+            console.log(`🔗 Cleaned up correlation for session ${sessionId}`);
+        } catch (error) {
+            console.warn('⚠️ Failed to cleanup correlation (non-fatal):', error.message);
+        }
+
         console.log(`🗑️ Deleted session: ${session.name} (${sessionId})`);
         return true;
     }

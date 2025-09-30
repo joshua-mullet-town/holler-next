@@ -11,6 +11,8 @@ import { io } from 'socket.io-client';
 import '@xterm/xterm/css/xterm.css';
 import SessionManagementModal from './SessionManagementModal';
 import FloatingWorkbench from './FloatingWorkbench';
+import KokoroTTSProof from '../lib/KokoroTTSProof';
+import SuperchargedTTSManager from '../lib/SuperchargedTTSManager';
 
 interface HollerSession {
   id: string;
@@ -35,19 +37,24 @@ const HollerSessionManager: React.FC = () => {
   const [activeSessionId, setActiveSessionId] = useState<string>('');
   const [terminals, setTerminals] = useState<Map<string, TerminalInstance>>(new Map());
   const [socket, setSocket] = useState<any>(null);
+  const [ttsManager, setTtsManager] = useState<any>(null);
+  const ttsManagerRef = useRef<any>(null);
+  
+  // Kokoro TTS POC state
+  const [kokoroPOC, setKokoroPOC] = useState<KokoroTTSProof | null>(null);
+  const [kokoroLoading, setKokoroLoading] = useState(false);
+  const [kokoroStatus, setKokoroStatus] = useState('');
+  
+  // Supercharged TTS state
+  const [superchargedTTS, setSuperchargedTTS] = useState<SuperchargedTTSManager | null>(null);
+  
   const [showBrowsePromoteModal, setShowBrowsePromoteModal] = useState(false);
   const [showCreateNewInput, setShowCreateNewInput] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
   const [newSessionProjectPath, setNewSessionProjectPath] = useState('/Users/joshuamullet/code/holler');
   const [availableDirectories, setAvailableDirectories] = useState<string[]>([]);
 
-  // Right panel state
-  const [activeRightTab, setActiveRightTab] = useState<'planning' | 'files' | 'tools'>('planning');
-  const [sessionMdContent, setSessionMdContent] = useState<string>('');
-  const [todoMdContent, setTodoMdContent] = useState<string>('');
-  const [planningDocsLoading, setPlanningDocsLoading] = useState(false);
-  const [sessionMdSaving, setSessionMdSaving] = useState(false);
-  const [todoMdSaving, setTodoMdSaving] = useState(false);
+  // Right panel removed for performance
 
   // Session management UI state
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -75,10 +82,7 @@ const HollerSessionManager: React.FC = () => {
 
         if (sessions.length > sessionIndex) {
           const targetSession = sessions[sessionIndex];
-          console.log(`🔥 Hotkey: Switching to session ${event.key}: ${targetSession.name}`);
           switchToSession(targetSession.id);
-        } else {
-          console.log(`⚠️ Hotkey: No session at index ${event.key}`);
         }
         return;
       }
@@ -87,7 +91,6 @@ const HollerSessionManager: React.FC = () => {
       if (event.altKey && event.key.toLowerCase() === 'b') {
         event.preventDefault();
         event.stopPropagation();
-        console.log(`🔥 Hotkey: Opening Browse & Promote`);
         setShowBrowsePromoteModal(true);
         return;
       }
@@ -96,7 +99,6 @@ const HollerSessionManager: React.FC = () => {
       if (event.altKey && event.key.toLowerCase() === 'n') {
         event.preventDefault();
         event.stopPropagation();
-        console.log(`🔥 Hotkey: Opening Create New`);
         setShowCreateNewInput(true);
         setNewSessionName('');
         return;
@@ -120,16 +122,7 @@ const HollerSessionManager: React.FC = () => {
     };
   }, [sessions]); // Re-run when sessions change
 
-  // Load planning docs when active session changes
-  useEffect(() => {
-    if (activeSessionId && sessions.length > 0) {
-      const activeSession = sessions.find(s => s.id === activeSessionId);
-      if (activeSession) {
-        const projectPath = activeSession.projectPath || '/Users/joshuamullet/code/holler';
-        loadPlanningDocs(projectPath);
-      }
-    }
-  }, [activeSessionId, sessions]);
+  // Right panel removed for performance
 
   // Initialize socket connection
   const loadAvailableDirectories = async () => {
@@ -140,23 +133,153 @@ const HollerSessionManager: React.FC = () => {
         setAvailableDirectories(data.directories);
       }
     } catch (error) {
-      console.error('Failed to load directories:', error);
+      // Failed to load directories
     }
   };
+
+  // Initialize Kokoro TTS POC
+  useEffect(() => {
+    const initKokoroPOC = async () => {
+      try {
+        console.log('🤖 KOKORO POC: Initializing...');
+        const kokoroInstance = new KokoroTTSProof();
+        setKokoroPOC(kokoroInstance);
+        console.log('🤖 KOKORO POC: Instance created (model will load on first use)');
+      } catch (error) {
+        console.error('❌ KOKORO POC: Failed to create instance:', error);
+      }
+    };
+    
+    initKokoroPOC();
+  }, []);
+
+  // Initialize Supercharged TTS
+  useEffect(() => {
+    const initSuperchargedTTS = async () => {
+      try {
+        console.log('⚡ SUPERCHARGED TTS: Initializing...');
+        const superchargedInstance = new SuperchargedTTSManager();
+        setSuperchargedTTS(superchargedInstance);
+        console.log('⚡ SUPERCHARGED TTS: Instance created and voice analysis complete');
+      } catch (error) {
+        console.error('❌ SUPERCHARGED TTS: Failed to create instance:', error);
+      }
+    };
+    
+    initSuperchargedTTS();
+  }, []);
 
   useEffect(() => {
     let isActive = true;
     let socketConnection: any = null;
 
     const initConnection = async () => {
+      console.log('🔧 INIT: Starting connection initialization...');
       try {
+        console.log('🔧 INIT: Loading directories...');
         loadAvailableDirectories();
+        console.log('🔧 INIT: Creating socket connection...');
         socketConnection = io('http://localhost:3002');
         setSocket(socketConnection);
+
+        console.log('🔧 INIT: About to initialize TTS...');
+        // Initialize TTS Queue Manager
+        const initTTS = async () => {
+          try {
+            console.log('🔊 TTS: Starting initialization...');
+            
+            // Try to import the TTS manager class
+            let TTSQueueManager;
+            try {
+              console.log('🔊 TTS: Attempting dynamic import...');
+              const module = await import('../lib/TTSQueueManager.js');
+              TTSQueueManager = module.default;
+              console.log('🔊 TTS: Dynamic import successful');
+            } catch (e) {
+              console.log('🔊 TTS: Dynamic import failed, trying alternative path...', e.message);
+              const module = await import('../lib/TTSQueueManager');
+              TTSQueueManager = module.default;
+              console.log('🔊 TTS: Alternative import successful');
+            }
+            
+            if (!TTSQueueManager) {
+              throw new Error('TTSQueueManager class not found in module');
+            }
+            
+            console.log('🔊 TTS: Creating TTS instance...');
+            const ttsInstance = new TTSQueueManager();
+            console.log('🔊 TTS: TTS instance created:', !!ttsInstance);
+            console.log('🔊 TTS: Setting TTS manager state AND ref...');
+            setTtsManager(ttsInstance);
+            ttsManagerRef.current = ttsInstance;
+            console.log('🔊 TTS: Queue manager initialized successfully');
+            console.log('🔊 TTS: Instance methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(ttsInstance)));
+            console.log('🔊 TTS: Ref is set:', !!ttsManagerRef.current);
+          } catch (error) {
+            console.error('❌ TTS: Failed to initialize:', error);
+            
+            // Create a robust fallback TTS manager
+            console.log('🔊 TTS: Creating enhanced fallback TTS manager');
+            const fallbackTTS = {
+              isEnabled: false,
+              isSupported: 'speechSynthesis' in window,
+              enable: function() {
+                this.isEnabled = true;
+                console.log('🔊 TTS FALLBACK: Enabled');
+                return true;
+              },
+              disable: function() {
+                this.isEnabled = false;
+                console.log('🔊 TTS FALLBACK: Disabled');
+              },
+              addMessage: function(text: string, options = {}) {
+                console.log(`🔊 TTS FALLBACK: Processing message (${text.length} chars)`);
+                
+                if (!this.isSupported) {
+                  console.log('🔇 TTS FALLBACK: Speech synthesis not supported');
+                  return;
+                }
+                
+                if (!this.isEnabled) {
+                  console.log('🔇 TTS FALLBACK: TTS not enabled, auto-enabling...');
+                  this.enable();
+                }
+                
+                console.log(`🔊 TTS FALLBACK: Speaking: "${text.substring(0, 100)}..."`);
+                try {
+                  const utterance = new SpeechSynthesisUtterance(text);
+                  utterance.rate = 1.0;
+                  utterance.volume = 1.0;
+                  utterance.pitch = 1.0;
+                  
+                  utterance.onstart = () => console.log('🔊 TTS FALLBACK: Speech started');
+                  utterance.onend = () => console.log('🔊 TTS FALLBACK: Speech finished');
+                  utterance.onerror = (e) => console.error('❌ TTS FALLBACK: Speech error:', e);
+                  
+                  window.speechSynthesis.speak(utterance);
+                } catch (e) {
+                  console.error('❌ TTS FALLBACK: Failed to speak:', e);
+                }
+              },
+              getStatus: function() {
+                return {
+                  isSupported: this.isSupported,
+                  isEnabled: this.isEnabled,
+                  fallback: true
+                };
+              }
+            };
+            
+            setTtsManager(fallbackTTS);
+            console.log('🔊 TTS: Fallback TTS manager created and initialized');
+          }
+        };
+        await initTTS();
 
         socketConnection.on('connect', () => {
           // Request list of existing sessions
           socketConnection.emit('session:list');
+          console.log('🔗 Socket connected - TTS listener should be active');
         });
 
         socketConnection.on('disconnect', () => {
@@ -164,7 +287,7 @@ const HollerSessionManager: React.FC = () => {
         });
 
         socketConnection.on('connect_error', (error: any) => {
-          console.error('Connection error:', error);
+          // Connection error
         });
 
         // Handle session list response
@@ -290,6 +413,56 @@ const HollerSessionManager: React.FC = () => {
           ));
         });
 
+        // Listen for TTS messages from Jarvis planning mode
+        socketConnection.on('jarvis-tts', (data: {
+          sessionId: string,
+          text: string,
+          timestamp: string,
+          messageLength: number
+        }) => {
+          console.log(`🔊 TTS: Message for session ${data.sessionId} (${data.messageLength} chars)`);
+          
+          // Get current TTS manager - prioritize ref for immediate availability
+          const activeTtsManager = ttsManagerRef.current;
+          
+          if (!activeTtsManager) {
+            console.log('🔇 TTS: Manager not initialized');
+            return;
+          }
+          
+          // Access current sessions through state callback
+          setSessions(currentSessions => {
+            const session = currentSessions.find(s => s.id === data.sessionId);
+            
+            if (session?.jarvisMode) {
+              console.log(`🔊 TTS: Speaking for Jarvis session`);
+              
+              // Enable TTS on first use (required for browser autoplay policies)
+              if (!activeTtsManager.isEnabled) {
+                console.log('🔊 TTS: Auto-enabling');
+                activeTtsManager.enable();
+              }
+              
+              // Add message to TTS queue
+              activeTtsManager.addMessage(data.text, { sessionId: data.sessionId });
+            } else {
+              console.log(`🔇 TTS: Session not in Jarvis mode`);
+            }
+            
+            // Return unchanged sessions (we're just using this to access current state)
+            return currentSessions;
+          });
+        });
+
+        // DEBUG: Listen for test events to verify socket communication
+        socketConnection.on('tts-debug-test', (data: {
+          message: string,
+          timestamp: number
+        }) => {
+          console.log(`🔊 DEBUG: Received test event from backend:`, data);
+          console.log(`🔊 DEBUG: Socket communication is working!`);
+        });
+
       } catch (error) {
         console.error('Connection error:', error);
       }
@@ -362,7 +535,7 @@ const HollerSessionManager: React.FC = () => {
 
       // Setup input handling
       xterm.onData((data: string) => {
-        console.log(`📝 [${session.terminalId}] Sending input:`, data.charCodeAt(0));
+        // Input logging removed for cleaner console
         socketConnection.emit('terminal:input', session.terminalId, data);
       });
 
@@ -430,106 +603,9 @@ const HollerSessionManager: React.FC = () => {
     setNewSessionProjectPath('/Users/joshuamullet/code/holler');
   };
 
-  // Load planning documents for the current project
-  const loadPlanningDocs = async (projectPath: string) => {
-    setPlanningDocsLoading(true);
-    try {
-      console.log(`📋 Loading planning docs from: ${projectPath}`);
+  // Right panel and planning docs removed for performance
 
-      // Try to read session.md
-      try {
-        const sessionResponse = await fetch('/api/files/read', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filePath: `${projectPath}/session.md` })
-        });
-        if (sessionResponse.ok) {
-          const sessionData = await sessionResponse.text();
-          setSessionMdContent(sessionData);
-        } else {
-          setSessionMdContent('# Session Notes\n\nNo session.md found in this project.');
-        }
-      } catch (err) {
-        setSessionMdContent('# Session Notes\n\nError loading session.md');
-      }
-
-      // Try to read todo.md
-      try {
-        const todoResponse = await fetch('/api/files/read', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filePath: `${projectPath}/todo.md` })
-        });
-        if (todoResponse.ok) {
-          const todoData = await todoResponse.text();
-          setTodoMdContent(todoData);
-        } else {
-          setTodoMdContent('# Todo\n\nNo todo.md found in this project.');
-        }
-      } catch (err) {
-        setTodoMdContent('# Todo\n\nError loading todo.md');
-      }
-
-    } catch (error) {
-      console.error('❌ Error loading planning docs:', error);
-      setSessionMdContent('# Session Notes\n\nError loading documents');
-      setTodoMdContent('# Todo\n\nError loading documents');
-    } finally {
-      setPlanningDocsLoading(false);
-    }
-  };
-
-  // Auto-save functions with debouncing
-  const saveFileContent = async (filePath: string, content: string, setSaving: (saving: boolean) => void) => {
-    setSaving(true);
-    try {
-      const response = await fetch('/api/files/write', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath, content })
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('❌ Failed to save file:', errorData.error);
-      }
-    } catch (error) {
-      console.error('❌ Error saving file:', error);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const debouncedSaveSessionMd = useCallback(
-    debounce((content: string, projectPath: string) => {
-      if (projectPath) {
-        saveFileContent(`${projectPath}/session.md`, content, setSessionMdSaving);
-      }
-    }, 1000),
-    []
-  );
-
-  const debouncedSaveTodoMd = useCallback(
-    debounce((content: string, projectPath: string) => {
-      if (projectPath) {
-        saveFileContent(`${projectPath}/todo.md`, content, setTodoMdSaving);
-      }
-    }, 1000),
-    []
-  );
-
-  // Debounce utility function
-  function debounce(func: Function, wait: number) {
-    let timeout: NodeJS.Timeout;
-    return function executedFunction(...args: any[]) {
-      const later = () => {
-        clearTimeout(timeout);
-        func(...args);
-      };
-      clearTimeout(timeout);
-      timeout = setTimeout(later, wait);
-    };
-  }
+  // Auto-save functions removed with right panel for performance
 
   const switchToSession = (sessionId: string) => {
     setActiveSessionId(sessionId);
@@ -859,6 +935,149 @@ const HollerSessionManager: React.FC = () => {
             <span className="text-xs opacity-75">TEST</span>
           </motion.button>
 
+          {/* TTS Test Button */}
+          <motion.button
+            onClick={async () => {
+              console.log('🔊 TTS Test: Testing text-to-speech functionality');
+              
+              try {
+                if (!ttsManager) {
+                  console.error('❌ TTS Test: TTS manager not initialized');
+                  alert('TTS manager not initialized. Check console for errors.');
+                  return;
+                }
+                
+                // Enable TTS if not already enabled
+                if (!ttsManager.isEnabled) {
+                  console.log('🔊 TTS Test: Enabling TTS manager');
+                  const enabled = ttsManager.enable();
+                  if (!enabled) {
+                    console.error('❌ TTS Test: Failed to enable TTS');
+                    alert('Failed to enable TTS. Browser may not support speech synthesis.');
+                    return;
+                  }
+                }
+                
+                // Test message
+                const testText = "Hello! This is a test of the text-to-speech system. If you can hear this, the TTS queue is working correctly.";
+                
+                console.log('🔊 TTS Test: Adding test message to queue');
+                ttsManager.addMessage(testText, { sessionId: 'test' });
+                
+                console.log('✅ TTS Test: Test message queued successfully');
+              } catch (error) {
+                console.error('❌ TTS Test: Failed:', error);
+                alert(`TTS Test failed: ${error.message}`);
+              }
+            }}
+            className="w-full flex items-center justify-center space-x-2 bg-purple-500/20 hover:bg-purple-500/30 text-white p-3 rounded-xl transition-all"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <span>🔊</span>
+            <span>TTS Test (Web Speech)</span>
+            <span className="text-xs opacity-75">ROBOT</span>
+          </motion.button>
+
+          {/* Kokoro AI Test Button - POC */}
+          <motion.button
+            onClick={async () => {
+              console.log('🤖 KOKORO POC: Testing Kokoro AI voice');
+              
+              if (!kokoroPOC) {
+                alert('Kokoro POC not initialized. Check console for errors.');
+                return;
+              }
+
+              setKokoroLoading(true);
+              setKokoroStatus('Initializing AI voice model...');
+
+              try {
+                // Test message comparing to Web Speech API
+                const testText = "Hello! This is the new Kokoro AI voice. Notice how much more natural and human-like this sounds compared to the robotic Web Speech API. This is the future of text-to-speech!";
+                
+                console.log('🤖 KOKORO POC: Starting voice test');
+                setKokoroStatus('Generating speech...');
+                
+                await kokoroPOC.speak(testText);
+                
+                setKokoroStatus('✅ Voice test completed!');
+                console.log('✅ KOKORO POC: Voice test completed successfully');
+                
+                // Clear status after 3 seconds
+                setTimeout(() => setKokoroStatus(''), 3000);
+                
+              } catch (error) {
+                console.error('❌ KOKORO POC: Voice test failed:', error);
+                setKokoroStatus('❌ Voice test failed');
+                alert(`Kokoro AI Test failed: ${error.message}`);
+                
+                // Clear error status after 5 seconds
+                setTimeout(() => setKokoroStatus(''), 5000);
+              } finally {
+                setKokoroLoading(false);
+              }
+            }}
+            disabled={kokoroLoading}
+            className={`w-full flex items-center justify-center space-x-2 ${
+              kokoroLoading 
+                ? 'bg-orange-500/40 cursor-not-allowed' 
+                : 'bg-orange-500/20 hover:bg-orange-500/30'
+            } text-white p-3 rounded-xl transition-all`}
+            whileHover={kokoroLoading ? {} : { scale: 1.02 }}
+            whileTap={kokoroLoading ? {} : { scale: 0.98 }}
+          >
+            <span>{kokoroLoading ? '⏳' : '🤖'}</span>
+            <span>{kokoroLoading ? 'Loading AI...' : 'Kokoro AI Test'}</span>
+            <span className="text-xs opacity-75">{kokoroLoading ? 'WAIT' : 'HUMAN'}</span>
+          </motion.button>
+
+          {/* Kokoro Status Display */}
+          {kokoroStatus && (
+            <div className="bg-orange-500/10 border border-orange-500/30 rounded-xl p-3 text-center">
+              <p className="text-orange-200 text-sm">{kokoroStatus}</p>
+            </div>
+          )}
+
+          {/* Supercharged TTS Test Button */}
+          <motion.button
+            onClick={async () => {
+              console.log('⚡ SUPERCHARGED TTS: Testing optimized Web Speech API');
+              
+              if (!superchargedTTS) {
+                alert('Supercharged TTS not initialized. Check console for errors.');
+                return;
+              }
+
+              try {
+                // Enable if not already enabled
+                if (!superchargedTTS.isEnabled) {
+                  console.log('⚡ SUPERCHARGED TTS: Enabling...');
+                  superchargedTTS.enable();
+                }
+                
+                // Test message comparing to basic Web Speech API
+                const testText = "Hello! This is the supercharged Web Speech API with research-based optimizations. I automatically selected the best available voice and optimized the speech parameters for maximum naturalness and clarity. Notice the improved quality compared to the basic version!";
+                
+                console.log('⚡ SUPERCHARGED TTS: Speaking with optimized settings');
+                await superchargedTTS.addMessage(testText, { sessionId: 'supercharged-test' });
+                
+                console.log('✅ SUPERCHARGED TTS: Voice test completed successfully');
+                
+              } catch (error) {
+                console.error('❌ SUPERCHARGED TTS: Voice test failed:', error);
+                alert(`Supercharged TTS Test failed: ${error.message}`);
+              }
+            }}
+            className="w-full flex items-center justify-center space-x-2 bg-yellow-500/20 hover:bg-yellow-500/30 text-white p-3 rounded-xl transition-all"
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <span>⚡</span>
+            <span>Supercharged TTS Test</span>
+            <span className="text-xs opacity-75">OPTIMIZED</span>
+          </motion.button>
+
 
           {/* Create New Button or Input */}
           {showCreateNewInput ? (
@@ -1176,8 +1395,57 @@ const HollerSessionManager: React.FC = () => {
         )}
       </div>
 
+      {/* Jarvis Plan Display - Only for Jarvis Mode sessions */}
+      {(() => {
+        const activeSession = sessions.find(s => s.id === activeSessionId);
+        return activeSession?.jarvisMode ? (
+          <div className="w-80 bg-purple-900/20 backdrop-blur-md border-l border-r border-purple-500/30 flex flex-col">
+            {/* Jarvis Plan Header */}
+            <div className="p-4 border-b border-purple-500/30">
+              <div className="flex items-center space-x-2 mb-2">
+                <div className="text-2xl">🤖</div>
+                <div>
+                  <h3 className="text-white font-semibold">Jarvis Mode</h3>
+                  <p className="text-purple-200 text-xs">
+                    Mode: {activeSession.mode || 'planning'}
+                  </p>
+                </div>
+              </div>
+            </div>
+            
+            {/* Plan Content */}
+            <div className="flex-1 p-4 overflow-y-auto">
+              {activeSession.plan ? (
+                <div className="text-white/90 text-sm leading-relaxed whitespace-pre-wrap">
+                  {activeSession.plan}
+                </div>
+              ) : (
+                <div className="text-purple-300/60 text-sm italic">
+                  No plan available yet...
+                </div>
+              )}
+            </div>
+            
+            {/* Jarvis Status Footer */}
+            <div className="p-3 border-t border-purple-500/30 bg-purple-900/10">
+              <div className="text-xs text-purple-200 flex items-center justify-between">
+                <span>✨ Voice-collaborative AI</span>
+                <span className="text-purple-400">Active</span>
+              </div>
+            </div>
+          </div>
+        ) : null;
+      })()}
+
       {/* Terminal Area */}
-      <div className="flex-1 relative max-w-4xl">
+      <div className={`flex-1 relative max-w-4xl transition-all duration-300 ${
+        (() => {
+          const activeSession = sessions.find(s => s.id === activeSessionId);
+          return activeSession?.jarvisMode 
+            ? 'border-2 border-purple-500/50 rounded-lg shadow-lg shadow-purple-500/20' 
+            : '';
+        })()
+      }`}>
         {sessions.length === 0 && (
           <div className="flex items-center justify-center h-full text-white/60">
             <div className="text-center">
@@ -1202,118 +1470,7 @@ const HollerSessionManager: React.FC = () => {
         ))}
       </div>
 
-      {/* Right Panel - Tabbed Interface */}
-      <div className="w-96 bg-black/10 backdrop-blur-md border-l border-white/30 flex flex-col">
-        {/* Tab Navigation */}
-        <div className="flex border-b border-white/30">
-          <button
-            onClick={() => setActiveRightTab('planning')}
-            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeRightTab === 'planning'
-                ? 'bg-orange-500/20 text-white border-b-2 border-orange-500'
-                : 'text-white/70 hover:text-white hover:bg-white/10'
-              }`}
-          >
-            📋 Planning
-          </button>
-          <button
-            onClick={() => setActiveRightTab('files')}
-            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeRightTab === 'files'
-                ? 'bg-orange-500/20 text-white border-b-2 border-orange-500'
-                : 'text-white/70 hover:text-white hover:bg-white/10'
-              }`}
-          >
-            📁 Files
-          </button>
-          <button
-            onClick={() => setActiveRightTab('tools')}
-            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeRightTab === 'tools'
-                ? 'bg-orange-500/20 text-white border-b-2 border-orange-500'
-                : 'text-white/70 hover:text-white hover:bg-white/10'
-              }`}
-          >
-            🔧 Tools
-          </button>
-        </div>
-
-        {/* Tab Content */}
-        <div className="flex-1 overflow-hidden">
-          {activeRightTab === 'planning' && (
-            <div className="h-full flex flex-col">
-              {planningDocsLoading ? (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-white/60">Loading planning docs...</div>
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col space-y-4 p-4">
-                  {/* Session.md */}
-                  <div className="flex-1 min-h-0">
-                    <h4 className="text-sm font-semibold text-white/80 mb-2 flex items-center gap-2">
-                      session.md
-                      {sessionMdSaving && (
-                        <span className="text-xs text-orange-400 opacity-75">saving...</span>
-                      )}
-                    </h4>
-                    <textarea
-                      value={sessionMdContent}
-                      onChange={(e) => {
-                        const newValue = e.target.value;
-                        setSessionMdContent(newValue);
-                        const activeSession = sessions.find(s => s.id === activeSessionId);
-                        if (activeSession) {
-                          const projectPath = activeSession.projectPath || '/Users/joshuamullet/code/holler';
-                          debouncedSaveSessionMd(newValue, projectPath);
-                        }
-                      }}
-                      className="w-full h-full bg-black/20 text-white text-xs font-mono border border-white/30 rounded px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-orange-500"
-                      placeholder="Session notes and current work..."
-                    />
-                  </div>
-
-                  {/* Todo.md */}
-                  <div className="flex-1 min-h-0">
-                    <h4 className="text-sm font-semibold text-white/80 mb-2 flex items-center gap-2">
-                      todo.md
-                      {todoMdSaving && (
-                        <span className="text-xs text-orange-400 opacity-75">saving...</span>
-                      )}
-                    </h4>
-                    <textarea
-                      value={todoMdContent}
-                      onChange={(e) => {
-                        const newValue = e.target.value;
-                        setTodoMdContent(newValue);
-                        const activeSession = sessions.find(s => s.id === activeSessionId);
-                        if (activeSession) {
-                          const projectPath = activeSession.projectPath || '/Users/joshuamullet/code/holler';
-                          debouncedSaveTodoMd(newValue, projectPath);
-                        }
-                      }}
-                      className="w-full h-full bg-black/20 text-white text-xs font-mono border border-white/30 rounded px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-orange-500"
-                      placeholder="Todo items and task tracking..."
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeRightTab === 'files' && (
-            <div className="p-4 h-full">
-              <div className="text-white/60 text-sm">
-                File browser will appear here
-              </div>
-            </div>
-          )}
-
-          {activeRightTab === 'tools' && (
-            <div className="p-4 h-full">
-              <div className="text-white/60 text-sm">
-                Project-specific tools will appear here
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+      {/* Right panel removed for performance optimization */}
 
       {/* Browse & Promote Modal */}
       <SessionManagementModal

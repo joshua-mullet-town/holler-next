@@ -22,8 +22,8 @@ export default function HollerTerminal() {
       setIsSocketConnected(true);
     });
     
-    socket.on('disconnect', () => {
-      console.log('🔌 Global socket disconnected');
+    socket.on('disconnect', (reason) => {
+      console.log(`🔌 Frontend disconnect - Reason: ${reason} - Time: ${Date.now()}`);
       setIsSocketConnected(false);
     });
     

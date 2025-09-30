@@ -27,7 +27,7 @@ const TimelineVisualizer: React.FC<TimelineVisualizerProps> = ({ isRecording }) 
       
       // Listen for record-end event to store the blob
       recordPluginRef.current.on('record-end', (blob: Blob) => {
-        console.log('🎙️ Recording ended, blob received:', blob);
+        // Recording ended, blob received
         (window as any).hollerRecordedBlob = blob;
       });
     }
@@ -132,7 +132,7 @@ export default function FloatingWorkbench({ activeSessionId, onSendMessage }: Fl
       setError('');
       // Don't clear preview or text when starting a new recording
     } catch (err) {
-      console.error('Error starting recording:', err);
+      // Error starting recording
       setError('Failed to access microphone');
     }
   }, []);
@@ -200,7 +200,7 @@ export default function FloatingWorkbench({ activeSessionId, onSendMessage }: Fl
       // Clear this recording's audio chunks (ready for next recording)
       audioChunksRef.current = [];
     } catch (err) {
-      console.error('Transcription error:', err);
+      // Transcription error
       setError(err instanceof Error ? err.message : 'Transcription failed');
       setShowTextPreview(true);
     } finally {
@@ -241,7 +241,7 @@ export default function FloatingWorkbench({ activeSessionId, onSendMessage }: Fl
       setError('');
       audioChunksRef.current = [];
     } catch (err) {
-      console.error('Direct send error:', err);
+      // Direct send error
       setError(err instanceof Error ? err.message : 'Failed to send message');
       setShowTextPreview(true);
     } finally {

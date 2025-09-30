@@ -11,6 +11,7 @@ const pty = require('node-pty');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
+const TailingReadableStream = require('tailing-stream');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -158,6 +159,7 @@ class WorkingTerminalManager {
 
 const terminalManager = new WorkingTerminalManager();
 const SessionManager = require('./lib/SessionManager');
+const CorrelationManager = require('./lib/CorrelationManager');
 
 // 📝 SIMPLE SESSION TRACKING: React to file monitor events
 
@@ -280,23 +282,34 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
     // sessionStart correlation replaced by message-content-based correlation in userPromptSubmit
     console.log(`📝 SESSION START: New Claude session ${event.sessionId} detected, waiting for user message to determine correct Holler session linkage`);
 
-    // CRITICAL: Still reload sessions to sync with any deletions that happened via API
-    sessionManager.reloadSessions();
+    // SQLite-only: No need to reload, data is always current
+  });
+
+  // 🔗 NEW: PARENT UUID CHAIN CORRELATION - Handle every message for correlation
+  fileMonitor.on('correlationRequest', async (event) => {
+    try {
+      console.log(`🔗 CORRELATION REQUEST: ${event.sessionId} (${event.messageType})`);
+
+      // Call the new correlation function
+      const linkedSession = await correlateByParentUuidChain(
+        event.sessionId,
+        event.parentUuid,
+        event.messageUuid,
+        sessionManager,
+        io
+      );
+
+      if (linkedSession) {
+        console.log(`✅ CORRELATION SUCCESS: Linked to Holler session ${linkedSession.id}`);
+      }
+    } catch (error) {
+      console.error('❌ CORRELATION REQUEST ERROR:', error);
+    }
   });
 
   fileMonitor.on('userPromptSubmit', async (event) => {
-    console.log('═══════════════════════════════════════════════════════════════');
-    console.log('🔍 FULL EVENT OBJECT DEBUG - ALL AVAILABLE DATA:');
-    console.log('═══════════════════════════════════════════════════════════════');
-    console.log(JSON.stringify(event, null, 2));
-    console.log('═══════════════════════════════════════════════════════════════');
-    console.log('📋 EVENT PROPERTIES BREAKDOWN:');
-    Object.keys(event).forEach(key => {
-      console.log(`  ${key}: ${typeof event[key]} = ${JSON.stringify(event[key])}`);
-    });
-    console.log('═══════════════════════════════════════════════════════════════');
-    
-    const logMessage = `${new Date().toISOString()} 💬 FILE MONITOR: User message detected in session: ${event.sessionId}`;
+    const logMessage = `💬 FILE MONITOR: User message in session: ${event.sessionId}`;
+    // console.log('event ✊:', event)
     console.log(logMessage);
     fs.appendFileSync('/tmp/file-monitor-test.log', logMessage + '\n');
 
@@ -310,7 +323,7 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
 
       if (sessionFileResult) {
         const claudeSessionFile = sessionFileResult;
-        console.log(`📁 FOUND SESSION FILE: ${claudeSessionFile}`);
+        // console.log(`📁 FOUND SESSION FILE: ${claudeSessionFile}`);
 
         // Read the last few lines to find the user message  
         const lastLines = execSync(`tail -5 "${claudeSessionFile}"`, { encoding: 'utf8' });
@@ -326,10 +339,9 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
                 : data.message.content[0]?.text || '';
 
               if (messageContent.trim().length > 10 && !messageContent.includes('/Users/joshuamullet/code')) { // Only track substantial messages, ignore project paths
-                console.log(`🔍 TRACKING USER MESSAGE: "${messageContent}" from session ${event.sessionId}`);
-
-                // 🎯 NEW PARENT UUID-BASED CORRELATION: Deterministic session linking
-                linkedHollerSession = await handleSessionCorrelation(event, sessionManager, io);
+                // 🚫 DISABLED: Auto-correlation (infinite loop source) 
+                console.log(`🔍 CORRELATION: User message detected in Claude session ${event.sessionId}`);
+                console.log(`📝 CORRELATION: Message content: "${messageContent.substring(0, 50)}..."`);
                 break; // Found user message, don't need to check other lines
               }
             }
@@ -354,15 +366,27 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
     }
   });
 
-  fileMonitor.on('stop', (event) => {
+  fileMonitor.on('stop', async (event) => {
+    console.log('🛑 event:', event)
     const logMessage = `${new Date().toISOString()} 🤖 FILE MONITOR: Claude response detected in session: ${event.sessionId}`;
-    console.log(logMessage);
+    // console.log(logMessage);
     fs.appendFileSync('/tmp/file-monitor-test.log', logMessage + '\n');
 
-    console.log(`🔍 AUTONOMOUS DEBUG: Stop event details:`, {
+    // Find Holler session for this Claude session
+    let hollerSession = sessionManager.getAllSessions()
+      .find(session => session.claudeSessionId === event.sessionId);
+
+    // 🎯 EXECUTION SESSION DETECTION: Check if this is an execution session
+    if (!hollerSession && event.isComplete) {
+      hollerSession = await checkForExecutionSession(event.sessionId, sessionManager);
+    }
+
+    console.log(`🛑 Stop event received:`, {
       sessionId: event.sessionId,
       isComplete: event.isComplete,
-      timestamp: event.timestamp
+      timestamp: event.timestamp,
+      hollerSessionFound: !!hollerSession,
+      hollerSessionId: hollerSession?.id
     });
 
     // 🟢 STATUS UPDATE: Claude finished response, ready for user input  
@@ -375,8 +399,7 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
 
       console.log(`✅ AUTONOMOUS DEBUG: Response is complete, checking for autonomous mode...`);
 
-      // CRITICAL: Reload sessions to get latest autonomousMode setting
-      sessionManager.reloadSessions();
+      // SQLite-only: Data is always current, no reload needed
 
       // Find Holler session to check autonomous mode
       const hollerSession = sessionManager.getAllSessions()
@@ -444,13 +467,315 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
       } else if (!hollerSession.autonomousMode) {
         console.log(`🔕 AUTONOMOUS DEBUG: Session ${hollerSession.id} has autonomousMode: ${hollerSession.autonomousMode}`);
       }
+
+      // Note: Jarvis mode logic moved outside isComplete check to process every message
+    }
+
+    // 🤖 JARVIS MODE: Process EVERY assistant message for TTS (outside isComplete check)
+    if (hollerSession && hollerSession.jarvisMode && hollerSession.mode === 'planning') {
+      handleJarvisPlanningCompletion(hollerSession, event, io);
+    } else if (hollerSession && hollerSession.jarvisMode && hollerSession.mode === 'execution') {
+      handleJarvisExecutionCompletion(hollerSession, event, io, terminalManager);
     }
   });
 }
 
 /**
+ * Handle Jarvis Mode planning completion - extract and store last assistant message
+ */
+async function handleJarvisPlanningCompletion(hollerSession, event, io) {
+  try {
+    console.log(`🎯 JARVIS PLANNING: Processing TTS for session ${hollerSession.id}`);
+
+    // Extract the last assistant message from the Claude session
+    const lastMessage = await extractLastAssistantMessage(event.sessionId);
+
+    if (lastMessage) {
+      // Store the message in session data for debugging/TTS
+      const session = sessionManager.getSession(hollerSession.id);
+      if (session) {
+        // 🔧 DEDUPLICATION: Check if this is the same message as last time
+        const isDuplicate = session.lastAssistantMessage === lastMessage;
+
+        if (!isDuplicate) {
+          session.lastAssistantMessage = lastMessage;
+          session.lastMessageTimestamp = event.timestamp;
+          session.lastMessageCaptured = new Date().toISOString();
+
+          sessionManager.saveSessions();
+
+          // 🔊 TTS: Emit message to frontend for speech synthesis
+          io.emit('jarvis-tts', {
+            sessionId: hollerSession.id,
+            text: lastMessage,
+            timestamp: event.timestamp,
+            messageLength: lastMessage.length
+          });
+          console.log(`🔊 JARVIS TTS: Emitted message (${lastMessage.length} chars)`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`❌ JARVIS PLANNING ERROR:`, error);
+  }
+}
+
+/**
+ * Check if a Claude session is an execution session by looking at execution mappings
+ */
+async function checkForExecutionSession(claudeSessionId, sessionManager) {
+  try {
+    const mappingFile = '/Users/joshuamullet/code/holler/holler-next/execution-mappings.json';
+    const mappings = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+
+    // Check if there's a pending execution
+    if (mappings.pendingExecution) {
+      console.log(`🔍 EXECUTION CHECK: Found pending execution for session ${mappings.pendingExecution.hollerSessionId}`);
+
+      // Update mapping with actual execution session ID
+      mappings[claudeSessionId] = mappings.pendingExecution;
+      delete mappings.pendingExecution;
+      fs.writeFileSync(mappingFile, JSON.stringify(mappings, null, 2));
+
+      // Return the original Holler session that started execution
+      const hollerSession = sessionManager.getSession(mappings[claudeSessionId].hollerSessionId);
+      console.log(`✅ EXECUTION CORRELATION: Linked execution session ${claudeSessionId} to Holler session ${hollerSession?.id}`);
+      return hollerSession;
+    }
+
+    // Check if this session ID is already mapped
+    if (mappings[claudeSessionId]) {
+      const hollerSession = sessionManager.getSession(mappings[claudeSessionId].hollerSessionId);
+      console.log(`✅ EXECUTION CORRELATION: Found existing mapping for ${claudeSessionId} → ${hollerSession?.id}`);
+      return hollerSession;
+    }
+
+  } catch (error) {
+    console.log(`⚠️ EXECUTION CHECK: Could not read execution mappings: ${error.message}`);
+  }
+
+  return null;
+}
+
+/**
+ * Handle Jarvis Mode execution completion - switch back to planning mode
+ */
+async function handleJarvisExecutionCompletion(hollerSession, event, io, terminalManager) {
+  try {
+    console.log(`🔍 EXECUTION-DEBUG: ▶️ ENTERING handleJarvisExecutionCompletion`);
+    console.log(`🔍 EXECUTION-DEBUG: Holler Session ID: ${hollerSession.id}`);
+    console.log(`🔍 EXECUTION-DEBUG: Claude Session ID: ${event.sessionId}`);
+    console.log(`🎯 JARVIS EXECUTION: Execution mode completed for session ${hollerSession.id}`);
+
+    // Update session mode from execution → planning
+    const session = sessionManager.getSession(hollerSession.id);
+    if (session) {
+      console.log(`🔄 JARVIS EXECUTION: Switching session ${hollerSession.id} from execution → planning mode`);
+      session.mode = 'planning';
+      session.lastUpdated = new Date().toISOString();
+      sessionManager.saveSessions();
+
+      console.log(`✅ JARVIS EXECUTION: Mode switch complete for session ${hollerSession.id}`);
+
+      // Schedule planning prompt injection after a short delay
+      setTimeout(async () => {
+        console.log(`🎯 JARVIS EXECUTION: Injecting planning prompt for session ${hollerSession.id}`);
+        await injectPlanningPrompt(hollerSession, terminalManager);
+      }, 2000); // 2 second delay to ensure execution is fully complete
+
+    } else {
+      console.error(`❌ JARVIS EXECUTION: Could not find session ${hollerSession.id} for mode switch`);
+    }
+
+  } catch (error) {
+    console.log(`🔍 EXECUTION-DEBUG: ❌ EXCEPTION IN handleJarvisExecutionCompletion: ${error.message}`);
+    console.error(`❌ JARVIS EXECUTION ERROR:`, error);
+  }
+}
+
+/**
+ * Build unified planning prompt with context-specific intro
+ */
+function buildPlanningPrompt(sessionId, contextType = 'initial') {
+  const contextIntro = contextType === 'post-execution'
+    ? `## Execution Complete - Planning Mode Resumed
+
+Check what was executed and identify any issues or next steps.`
+    : `🤖 **JARVIS PLANNING MODE**
+
+Check for context above to understand what we're working on.`;
+
+  return `${contextIntro}
+
+## Your Goal
+Create a plan that will be executed by another coding agent. **You do NOT execute the plan yourself.**
+
+Work with the user to build this plan and store it in the database. When they say "go to pound town claude code", execution begins.
+
+## Plan Management Scripts
+**Session ID:** ${sessionId}
+
+- Check current plan: \`node /Users/joshuamullet/code/holler/holler-next/scripts/db-viewer.js sessions\`
+- Store plan: \`node /Users/joshuamullet/code/holler/holler-next/scripts/set-plan.js ${sessionId} "plan content"\`
+
+## User Context
+- User is not looking at screen - keep responses short
+- **DO NOT enter Claude Code voice mode**
+- Ask simple questions, give direct answers
+
+## Plan Format
+Make the plan actionable for the execution agent:
+- Include necessary codebase context
+- Specify exactly what needs to be done  
+- List files to examine
+- Note any constraints`;
+}
+
+/**
+ * Inject planning prompt to restart the planning cycle
+ */
+async function injectPlanningPrompt(hollerSession, terminalManager) {
+  try {
+    console.log(`🎯 JARVIS PLANNING: Injecting planning prompt for session ${hollerSession.id}`);
+
+    const planningPrompt = buildPlanningPrompt(hollerSession.id, 'post-execution');
+
+    // Send the planning prompt to the terminal
+    const terminal = terminalManager.getTerminal(hollerSession.terminalId);
+    if (terminal) {
+      console.log(`📝 JARVIS PLANNING: Sending planning prompt to terminal ${hollerSession.terminalId}`);
+
+      // Send the prompt as if it's a user message to trigger Claude response
+      await terminal.sendInput(planningPrompt);
+
+      console.log(`✅ JARVIS PLANNING: Planning prompt injected successfully`);
+    } else {
+      console.error(`❌ JARVIS PLANNING: Terminal ${hollerSession.terminalId} not found`);
+    }
+
+  } catch (error) {
+    console.error(`❌ JARVIS PLANNING INJECTION ERROR:`, error);
+  }
+}
+
+// 🗑️ REMOVED: Plan functions - plans now stored in SQLite database
+// Use sessionManager.getSessionPlan() and sessionManager.updateSessionPlan() instead
+
+/**
+ * Extract the last assistant message from a Claude session file
+ */
+async function extractLastAssistantMessage(claudeSessionId) {
+  try {
+    // Get Claude project directory
+    const claudeProjectDir = sessionManager.getClaudeProjectDir();
+    const sessionFile = path.join(claudeProjectDir, `${claudeSessionId}.jsonl`);
+
+    if (!fs.existsSync(sessionFile)) {
+      return null;
+    }
+
+    const content = fs.readFileSync(sessionFile, 'utf8');
+    const lines = content.trim().split('\n').filter(line => line.trim());
+
+    // Find the last assistant message
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const entry = JSON.parse(lines[i]);
+
+        if (entry.type === 'assistant' && entry.message?.role === 'assistant') {
+          const textContent = entry.message.content
+            ?.filter(c => c.type === 'text')
+            ?.map(c => c.text)
+            ?.join('\n');
+
+          if (textContent?.trim()) {
+            return textContent.trim();
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('❌ Error extracting last assistant message:', error);
+    return null;
+  }
+}
+
+/**
+ * 🔗 NEW: PARENT UUID CHAIN CORRELATION
+ * 
+ * Simple approach: For every message, check if its parentUuid exists in any Holler session's chain.
+ * If found, update that session to point to the current Claude sessionId.
+ * This creates an "infinite chain" that always tracks the latest sessionId.
+ */
+async function correlateByParentUuidChain(sessionId, parentUuid, messageUuid, sessionManager, io) {
+  try {
+    console.log(`🔗 CHAIN CORRELATION: Processing sessionId=${sessionId}, parentUuid=${parentUuid}`);
+
+    // STEP 1: Handle new sessions (no parentUuid)
+    if (!parentUuid || parentUuid === null) {
+      console.log(`🆕 NEW SESSION: No parentUuid - creating new session link`);
+
+      // Use existing new session logic
+      const event = { sessionId, parentUuid, uuid: messageUuid };
+      const linkedSession = await handleNewSession(event, sessionManager, io);
+
+      // 🔗 CRITICAL FIX: Set the first message's UUID to start the chain!
+      if (linkedSession && messageUuid) {
+        console.log(`🔗 STARTING CHAIN: Setting first UUID ${messageUuid} for session ${linkedSession.id}`);
+        correlationManager.updateLastUuid(linkedSession.id, messageUuid);
+      }
+
+      return linkedSession;
+    }
+
+    // STEP 2: Search correlation manager for this parentUuid (hot path lookup)
+    const matchingSessionId = correlationManager.findSessionByParentUuid(parentUuid);
+    const matchingSession = matchingSessionId ? sessionManager.getSession(matchingSessionId) : null;
+
+    if (matchingSession) {
+      console.log(`🔗 CHAIN MATCH: Found parentUuid in session ${matchingSession.id}`);
+      console.log(`🔄 UPDATING: ${matchingSession.id} claudeSessionId ${matchingSession.claudeSessionId} → ${sessionId}`);
+
+      // Update the session's claudeSessionId to current sessionId
+      const updateSuccess = sessionManager.updateSessionWithClaude(matchingSession.id, sessionId);
+
+      if (updateSuccess) {
+        // Update correlation manager with current message UUID (hot path)
+        correlationManager.updateLastUuid(matchingSession.id, messageUuid);
+
+        console.log(`✅ CHAIN UPDATED: Session ${matchingSession.id} now points to ${sessionId}`);
+
+        // Real-time sync
+        if (io) {
+          io.emit('session:updated', {
+            sessionId: matchingSession.id,
+            claudeSessionId: sessionId,
+            timestamp: new Date().toISOString()
+          });
+        }
+
+        return matchingSession;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('❌ CHAIN CORRELATION ERROR:', error);
+    return null;
+  }
+}
+
+/**
+ * 🚫 OLD: PARENT UUID CORRELATION (Kept for fallback)
+ * 
  * NEW SIMPLIFIED CORRELATION: Parent UUID-based deterministic session linking
  * No more guessing - know definitively what to do based on parentUuid
+ * 
+ * ⚠️ DISABLED: This approach caused infinite loops due to filesystem scanning
  */
 async function handleSessionCorrelation(event, sessionManager, io) {
   try {
@@ -478,19 +803,19 @@ async function handleSessionCorrelation(event, sessionManager, io) {
  */
 async function handleNewSession(event, sessionManager, io) {
   console.log(`🆕 HANDLING NEW SESSION: ${event.sessionId}`);
-  
+
   // Find first Holler session without a Claude session ID
   const allSessions = sessionManager.getAllSessions();
   const unlinkedSession = allSessions.find(session => !session.claudeSessionId);
-  
+
   if (unlinkedSession) {
     console.log(`🔗 LINKING NEW SESSION: Holler ${unlinkedSession.id} ↔ Claude ${event.sessionId}`);
-    
+
     const linkSuccess = sessionManager.updateSessionWithClaude(unlinkedSession.id, event.sessionId);
-    
+
     if (linkSuccess) {
       console.log(`✅ NEW SESSION LINKED: ${unlinkedSession.id} ↔ ${event.sessionId}`);
-      
+
       // Real-time sync
       if (io) {
         io.emit('session:updated', {
@@ -499,68 +824,76 @@ async function handleNewSession(event, sessionManager, io) {
           timestamp: new Date().toISOString()
         });
       }
-      
+
       return unlinkedSession;
     }
   } else {
     console.log(`⚠️ NEW SESSION: No unlinked Holler sessions available`);
   }
-  
+
   return null;
 }
 
 /**
- * Handle session switches (parentUuid !== null)
+ * 🚫 OLD: Handle session switches (parentUuid !== null) - DISABLED 
+ * 
+ * ⚠️ INFINITE LOOP SOURCE: This function scans filesystem with grep, causing cascading file events
+ * REPLACED BY: correlateByParentUuidChain() which uses simple JSON lookups instead
  */
 async function handleSessionSwitch(event, sessionManager, io) {
-  console.log(`🔄 CHECKING SESSION SWITCH: ${event.sessionId}`);
+  console.log(`🚫 OLD SESSION SWITCH: Function disabled - using parentUuid chain correlation instead`);
+  return null;
+
+  /* 🚫 COMMENTED OUT: Filesystem scanning logic that caused infinite loops
   
+  console.log(`🔄 CHECKING SESSION SWITCH: ${event.sessionId}`);
+
   // Check if this session is already linked - if so, ignore
   const allSessions = sessionManager.getAllSessions();
   const existingLink = allSessions.find(session => session.claudeSessionId === event.sessionId);
-  
+
   if (existingLink) {
     console.log(`✅ SESSION ALREADY LINKED: ${existingLink.id} ↔ ${event.sessionId} - ignoring`);
     return existingLink;
   }
-  
+
   // Check if parentUuid exists in multiple files (session switch indicator)
   const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
-  
+
   try {
     const { execSync } = require('child_process');
     const grepResult = execSync(`find "${claudeProjectsDir}" -name "*.jsonl" -exec grep -l "${event.parentUuid}" {} \\;`, { encoding: 'utf8' });
     const filesWithParent = grepResult.trim().split('\n').filter(file => file.length > 0);
-    
+
     console.log(`🔍 PARENT UUID SEARCH: Found ${filesWithParent.length} files containing parentUuid ${event.parentUuid}`);
-    
+
     if (filesWithParent.length > 1) {
       console.log(`🔄 SESSION SWITCH DETECTED: Same parentUuid in multiple files`);
-      
+
       // Find the older file (session switch source)
       const filesWithStats = filesWithParent.map(filePath => {
         const stats = fs.statSync(filePath);
         const sessionId = path.basename(filePath, '.jsonl');
         return { filePath, sessionId, modTime: stats.mtime };
       });
-      
+
       // Sort by modification time (oldest first for switch source)
       filesWithStats.sort((a, b) => a.modTime - b.modTime);
       const olderFile = filesWithStats[0];
-      
+
       console.log(`📁 OLDER FILE: ${olderFile.sessionId} → NEWER FILE: ${event.sessionId}`);
-      
+
       // Check if older session is linked to Holler
       const hollerSession = allSessions.find(session => session.claudeSessionId === olderFile.sessionId);
-      
+
       if (hollerSession) {
         console.log(`🔄 SESSION SWITCH CONFIRMED: Updating ${hollerSession.id} from ${olderFile.sessionId} → ${event.sessionId}`);
-        
+
         const updateSuccess = sessionManager.updateSessionWithClaude(hollerSession.id, event.sessionId);
-        
+
         if (updateSuccess) {
           console.log(`✅ SESSION SWITCH COMPLETE: ${hollerSession.id} now points to ${event.sessionId}`);
-          
+
           // Real-time sync
           if (io) {
             io.emit('session:updated', {
@@ -569,7 +902,7 @@ async function handleSessionSwitch(event, sessionManager, io) {
               timestamp: new Date().toISOString()
             });
           }
-          
+
           return hollerSession;
         }
       } else {
@@ -578,12 +911,14 @@ async function handleSessionSwitch(event, sessionManager, io) {
     } else {
       console.log(`⚠️ SESSION SWITCH: parentUuid only in one file - not a session switch`);
     }
-    
+
   } catch (error) {
     console.log(`⚠️ SESSION SWITCH: Error searching for parentUuid - ${error.message}`);
   }
-  
+
   return null;
+  
+  */ // End of commented out filesystem scanning logic
 }
 
 // 🗑️ DEMOLISHED: Priority-based guessing logic replaced with parentUuid deterministic correlation
@@ -749,6 +1084,7 @@ class ClaudeSessionDiscoveryService {
 }
 
 const sessionManager = new SessionManager();
+const correlationManager = new CorrelationManager(sessionManager.db); // Share database instance
 const claudeDiscoveryService = new ClaudeSessionDiscoveryService(sessionManager);
 
 // TESTING: Basic file monitoring to replace hooks
@@ -762,6 +1098,8 @@ fileMonitor.startMonitoring().then(() => {
 }).catch(error => {
   console.error('❌ Failed to start file monitoring:', error);
 });
+
+// 🧪 REMOVED: Tail stream debug test
 
 // Claude session detection using real-time Claude Code hooks
 console.log('🎯 Using Claude Code hooks for real-time session correlation');
@@ -851,6 +1189,70 @@ app.prepare().then(() => {
       return;
     }
 
+    // Handle DELETE session requests (RESTful: DELETE /api/sessions/{sessionId})
+    if (parsedUrl.pathname.startsWith('/api/sessions/') && req.method === 'DELETE') {
+      const sessionId = parsedUrl.pathname.split('/api/sessions/')[1];
+      console.log(`🗑️ DELETE request received for session: ${sessionId}`);
+
+      const errors = [];
+      let jsonDeleted = false;
+      let terminalKilled = false;
+
+      let sessionManager;
+
+      try {
+        // Delete from backend session manager (SQLite)
+        sessionManager = new SessionManager();
+        const result = sessionManager.deleteSession(sessionId);
+
+        if (result.success) {
+          jsonDeleted = true;
+          console.log(`✅ Session ${sessionId} deleted from backend`);
+        } else {
+          errors.push(`Session not found in JSON: ${result.error}`);
+          console.log(`⚠️ Session ${sessionId} not found in backend storage`);
+        }
+      } catch (error) {
+        errors.push(`Backend deletion failed: ${error.message}`);
+        console.error(`❌ Backend deletion failed for ${sessionId}:`, error);
+      }
+
+      try {
+        // Also clean up terminal
+        terminalManager.killTerminal(sessionId);
+        terminalKilled = true;
+        console.log(`✅ Terminal killed for session: ${sessionId}`);
+      } catch (error) {
+        errors.push(`Terminal cleanup failed: ${error.message}`);
+        console.error(`❌ Terminal cleanup failed for ${sessionId}:`, error);
+      }
+
+      // Clean up correlations using shared database instance
+      try {
+        const CorrelationManager = require('./lib/CorrelationManager');
+        const correlationManager = new CorrelationManager(sessionManager?.db);
+        correlationManager.removeCorrelation(sessionId);
+        console.log(`🔗 Cleaned up correlation for session ${sessionId}`);
+      } catch (error) {
+        errors.push(`Correlation cleanup failed: ${error.message}`);
+        console.warn(`⚠️ Correlation cleanup failed for ${sessionId}:`, error.message);
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        details: {
+          sessionId,
+          jsonDeleted,
+          terminalKilled,
+          errors,
+          timestamp: new Date().toISOString()
+        }
+      }));
+
+      return;
+    }
+
     await handle(req, res, parsedUrl);
   });
 
@@ -864,373 +1266,296 @@ app.prepare().then(() => {
   // Set up file monitor event listeners with access to io
   setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager);
 
-/**
- * 🤖 JARVIS MODE: Send planning prompt to existing session (simplified approach)
- */
-async function sendPlanningPromptToSession(sessionId, sessionManager, io) {
-  try {
-    console.log(`🤖 JARVIS: Sending planning prompt to existing session: ${sessionId}`);
-
-    const session = sessionManager.getSession(sessionId);
-    if (!session) {
-      console.error(`❌ JARVIS: Session ${sessionId} not found`);
-      return;
-    }
-
-    // Build the planning prompt (keeping the good stuff, removing complexity)
-    const planningPrompt = `
-🤖 **JARVIS MODE: You are now in PLANNING MODE**
-
-## Your Role
-You are a collaborative planning partner building an execution plan with the user. Your job is to:
-
-1. **Analyze the previous conversation** - Look at what was requested vs what was accomplished
-2. **Build/update the plan** in holler-sessions.json for the next execution cycle
-3. **Research files when needed** to understand the codebase and context
-4. **Collaborate with user** to refine the plan together
-
-## Plan Management
-You must manage the plan in the holler-sessions.json file:
-
-**File Location:** /Users/joshuamullet/code/holler/holler-sessions.json
-**Your Session ID:** ${sessionId}
-
-**Instructions:**
-- Read the sessions file to understand current state
-- Find your session using the ID above
-- Update the "plan" field with your analysis and next steps
-- If the "plan" field doesn't exist, create it
-- Keep the plan focused and actionable for the next execution cycle
-
-## Critical Constraints
-
-### 🚫 **VOICE-ONLY USER**
-- User is walking around, can't see screen or retain long explanations
-- Keep responses **short and decision-focused**
-- Don't describe every tool - just important findings
-- Ask simple yes/no questions when possible
-
-### 🔍 **QUICK ANALYSIS** 
-- Check: Did Claude do what was asked?
-- Point out: Any major deviations or problems
-- Be direct: "I found an issue with..." or "Everything looks good"
-
-### 📁 **TARGETED RESEARCH**
-- Only research when you need specific info for next steps
-- Say: "Checking X file" then report key findings only
-- No exhaustive explanations - just what matters for decisions
-
-### 🎤 **BRIEF COLLABORATION**
-- Short questions: "Should we fix X first?" or "Ready to proceed?"
-- Small decisions: "Option A or B?"
-- Wait for magic phrase to trigger execution
-
-## Workflow
-
-1. **Quick Analysis**: Analyze the conversation - what did Claude do vs what was requested?
-2. **Initial Plan**: Create/update the plan in holler-sessions.json with your findings
-3. **Collaborate**: Discuss the plan with the user, refine based on their feedback
-4. **Final Plan**: Keep updating the plan until it's ready for execution
-
-## Plan Format
-The plan should be a clear, actionable prompt that the execution cycle can follow:
-
-- Include necessary context about the codebase
-- Specify exactly what needs to be done
-- List any files that need to be examined
-- Note any constraints or requirements
-
-## Execution Trigger
-When the user says "go", "execute", or "do it", an MCP action will:
-- Clear the current context
-- Send the plan as an execution prompt
-- Switch to execution mode
-
-## Important Notes
-- Always update the plan in holler-sessions.json after analysis
-- Keep responses short and decision-focused
-- The plan is the deliverable - make it comprehensive for execution
-- You already have conversation context - use it to analyze what happened
-
----
-
-**Start by analyzing what happened in the previous conversation and creating an initial plan.**
-`;
-
-    // Send the planning prompt to the existing session
-    console.log(`📤 JARVIS: Sending planning prompt to terminal ${session.terminalId}`);
-    
-    const success = terminalManager.writeToTerminal(session.terminalId, planningPrompt + '\n');
-    
-    if (!success) {
-      console.error(`❌ JARVIS: Failed to write planning prompt to terminal ${session.terminalId}`);
-      return;
-    }
-
-    // Send enter to submit the prompt (after a short delay for paste)
-    setTimeout(() => {
-      console.log(`🚀 JARVIS: Submitting planning prompt to ${session.terminalId}`);
-      const terminal = terminalManager.getTerminal(session.terminalId);
-      if (terminal && terminal.ptyProcess) {
-        terminal.ptyProcess.write('\r'); // Send enter through PTY
-      }
-    }, 1000);
-
-    console.log(`✅ JARVIS: Planning prompt sent to existing session ${sessionId}`);
-
-  } catch (error) {
-    console.error('❌ JARVIS: Error sending planning prompt to session:', error);
-  }
-}
-
-/**
- * 🤖 JARVIS MODE: Start Planner cycle by cloning session (DEPRECATED - keeping for reference)
- */
-async function startJarvisPlannerCycle_DEPRECATED(executorSessionId, sessionManager, io) {
-  try {
-    console.log(`🤖 JARVIS: Starting Planner cycle for executor session: ${executorSessionId}`);
-
-    // Get the executor session details
-    const executorSession = sessionManager.getSession(executorSessionId);
-    if (!executorSession) {
-      console.error(`❌ JARVIS: Executor session ${executorSessionId} not found`);
-      return;
-    }
-
-    if (!executorSession.claudeSessionId) {
-      console.error(`❌ JARVIS: Executor session ${executorSessionId} has no Claude session to clone`);
-      return;
-    }
-
-    // Generate new IDs for the Planner session
-    const timestamp = Date.now();
-    const plannerHollerSessionId = `jarvis-planner-${timestamp}`;
-    const plannerClaudeSessionId = generateUUID();
-    const plannerTerminalId = `jarvis-terminal-${timestamp}`;
-
-    console.log(`🧬 JARVIS: Cloning session ${executorSession.claudeSessionId} → ${plannerClaudeSessionId}`);
-
-    // Clone the conversation using existing method
-    const cloneResult = await fetch('http://localhost:3002/api/sessions/clone', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        originalClaudeSessionId: executorSession.claudeSessionId,
-        newClaudeSessionId: plannerClaudeSessionId
-      })
-    });
-
-    if (!cloneResult.ok) {
-      const errorData = await cloneResult.json();
-      throw new Error(errorData.error || 'Failed to clone conversation for Planner');
-    }
-
-    const cloneData = await cloneResult.json();
-    console.log(`✅ JARVIS: Conversation cloned successfully: ${cloneData.messageCount} messages`);
-
-    // Create Planner Holler session
-    const plannerSession = {
-      id: plannerHollerSessionId,
-      name: `🤖 Jarvis Planner (${executorSession.name})`,
-      terminalId: plannerTerminalId,
-      claudeSessionId: plannerClaudeSessionId,
-      created: new Date().toISOString(),
-      projectPath: executorSession.projectPath || '/Users/joshuamullet/code/holler',
-      isJarvisPlanner: true,
-      parentExecutorSession: executorSessionId
-    };
-
-    // Add Planner session to session manager
-    sessionManager.addSession(plannerSession);
-
-    // Launch Planner session with comprehensive prompt
-    await launchPlannerSession(plannerSession, io);
-
-    console.log(`🚀 JARVIS: Planner cycle started successfully: ${plannerHollerSessionId}`);
-
-  } catch (error) {
-    console.error('❌ JARVIS: Error starting Planner cycle:', error);
-  }
-}
-
-/**
- * 🧠 JARVIS: Launch Planner session with comprehensive prompt
- */
-async function launchPlannerSession(plannerSession, io) {
-  try {
-    console.log(`🧠 JARVIS: Launching Planner session: ${plannerSession.id}`);
-
-    // Emit session creation to establish terminal connection
-    io.emit('session:created', plannerSession);
-
-    // Wait a moment for terminal to be ready, then start the Claude session
-    setTimeout(async () => {
-      await startClaudeSessionInTerminal(plannerSession, io);
-    }, 2000); // 2 second delay to ensure terminal is ready
-
-    console.log(`✅ JARVIS: Planner session launched: ${plannerSession.id}`);
-
-  } catch (error) {
-    console.error('❌ JARVIS: Error launching Planner session:', error);
-  }
-}
-
-/**
- * 🧠 JARVIS: Start Claude session in terminal for Planner
- */
-async function startClaudeSessionInTerminal(plannerSession, io) {
-  try {
-    console.log(`🔥 JARVIS: Starting Claude session in terminal for: ${plannerSession.id}`);
-    console.log(`🔥 JARVIS: Using terminal ID: ${plannerSession.terminalId}`);
-    
-    // Wait for terminal to be actually created by polling
-    const maxAttempts = 20; // 10 seconds max
-    let attempts = 0;
-    
-    const waitForTerminal = () => {
-      return new Promise((resolve, reject) => {
-        const checkTerminal = () => {
-          attempts++;
-          console.log(`🔍 JARVIS: Checking for terminal (attempt ${attempts}/${maxAttempts})`);
-          
-          const terminalExists = terminalManager.terminals.has(plannerSession.terminalId);
-          
-          if (terminalExists) {
-            console.log(`✅ JARVIS: Terminal found: ${plannerSession.terminalId}`);
-            resolve(true);
-          } else if (attempts >= maxAttempts) {
-            console.error(`❌ JARVIS: Terminal not found after ${maxAttempts} attempts`);
-            console.log(`🔍 JARVIS: Available terminals:`, Array.from(terminalManager.terminals.keys()));
-            reject(new Error('Terminal not found'));
-          } else {
-            setTimeout(checkTerminal, 500); // Check every 500ms
-          }
-        };
-        
-        checkTerminal();
-      });
-    };
-    
-    // Wait for terminal to be ready
-    await waitForTerminal();
-    
-    // Send the holler command to start a fresh Claude session (cloned conversation will be in the prompt)
-    const hollerCommand = `holler\n`;
-    console.log(`💻 JARVIS: Executing command: ${hollerCommand.trim()}`);
-    
-    const success = terminalManager.writeToTerminal(plannerSession.terminalId, hollerCommand);
-    
-    if (!success) {
-      console.error(`❌ JARVIS: Failed to write to terminal ${plannerSession.terminalId}`);
-      console.log(`🔍 JARVIS: Available terminals:`, Array.from(terminalManager.terminals.keys()));
-      return;
-    }
-    
-    // Wait a moment for Claude to start, then send the Planner prompt
-    setTimeout(async () => {
-      await sendPlannerPrompt(plannerSession, io);
-    }, 5000); // 5 second delay for Claude to fully load
-    
-    console.log(`✅ JARVIS: Claude session started in terminal: ${plannerSession.id}`);
-    
-  } catch (error) {
-    console.error('❌ JARVIS: Error starting Claude session in terminal:', error);
-  }
-}
-
-/**
- * 🎯 JARVIS: Send comprehensive Planner prompt with conversation context
- */
-async function sendPlannerPrompt(plannerSession, io) {
-  try {
-    console.log(`🎯 JARVIS: Sending Planner prompt to session: ${plannerSession.id}`);
-
-    // Get conversation context from the cloned session
-    let conversationContext = "";
+  /**
+   * 🤖 JARVIS MODE: Send planning prompt to existing session (simplified approach)
+   */
+  async function sendPlanningPromptToSession(sessionId, sessionManager, io) {
     try {
-      const SessionManager = require('/Users/joshuamullet/code/holler/holler-next/lib/SessionManager');
-      const sessionManager = new SessionManager();
-      const claudeProjectDir = sessionManager.getClaudeProjectDir();
-      const fs = require('fs');
-      const path = require('path');
-      
-      console.log(`🐛 JARVIS CONTEXT DEBUG: claudeProjectDir = ${claudeProjectDir}`);
-      console.log(`🐛 JARVIS CONTEXT DEBUG: plannerSession.claudeSessionId = ${plannerSession.claudeSessionId}`);
-      
-      const clonedFile = path.join(claudeProjectDir, `${plannerSession.claudeSessionId}.jsonl`);
-      console.log(`🐛 JARVIS CONTEXT DEBUG: Looking for cloned file at: ${clonedFile}`);
-      console.log(`🐛 JARVIS CONTEXT DEBUG: File exists? ${fs.existsSync(clonedFile)}`);
-      
-      if (fs.existsSync(clonedFile)) {
-        const content = fs.readFileSync(clonedFile, 'utf8');
-        console.log(`🐛 JARVIS CONTEXT DEBUG: File content length: ${content.length}`);
-        
-        const lines = content.trim().split('\n').filter(line => line.trim());
-        console.log(`🐛 JARVIS CONTEXT DEBUG: Found ${lines.length} lines in conversation`);
-        
-        if (lines.length > 0) {
-          // Extract all message objects (no limit, keep it simple)
-          const messageObjects = lines.map(line => {
-            try {
-              const entry = JSON.parse(line);
-              
-              // Just extract the message object if it exists, with cleanup
-              if (entry.message) {
-                const cleanMessage = { ...entry.message };
-                
-                // Remove metadata fields that clutter the context
-                delete cleanMessage.id;
-                delete cleanMessage.model;
-                delete cleanMessage.stop_reason;
-                delete cleanMessage.stop_sequence;
-                delete cleanMessage.usage;
-                
-                return JSON.stringify(cleanMessage, null, 2);
-              }
-              
-              console.log(`🐛 JARVIS CONTEXT DEBUG: Skipped entry (no message field), type: ${entry.type}`);
-              return null;
-            } catch (e) {
-              console.log(`🐛 JARVIS CONTEXT DEBUG: Failed to parse line: ${e.message}`);
-              return null;
+      console.log(`🤖 JARVIS: Sending planning prompt to existing session: ${sessionId}`);
+
+      const session = sessionManager.getSession(sessionId);
+      if (!session) {
+        console.error(`❌ JARVIS: Session ${sessionId} not found`);
+        return;
+      }
+
+      // Build the unified planning prompt
+      const planningPrompt = buildPlanningPrompt(sessionId, 'initial');
+
+      // Send the planning prompt to the existing session
+      console.log(`📤 JARVIS: Sending planning prompt to terminal ${session.terminalId}`);
+
+      const success = terminalManager.writeToTerminal(session.terminalId, planningPrompt + '\n');
+
+      if (!success) {
+        console.error(`❌ JARVIS: Failed to write planning prompt to terminal ${session.terminalId}`);
+        return;
+      }
+
+      // Send enter to submit the prompt (after a short delay for paste)
+      setTimeout(() => {
+        console.log(`🚀 JARVIS: Submitting planning prompt to ${session.terminalId}`);
+        const terminal = terminalManager.getTerminal(session.terminalId);
+        if (terminal && terminal.ptyProcess) {
+          terminal.ptyProcess.write('\r'); // Send enter through PTY
+        }
+      }, 1000);
+
+      console.log(`✅ JARVIS: Planning prompt sent to existing session ${sessionId}`);
+
+    } catch (error) {
+      console.error('❌ JARVIS: Error sending planning prompt to session:', error);
+    }
+  }
+
+  /**
+   * 🤖 JARVIS MODE: Start Planner cycle by cloning session (DEPRECATED - keeping for reference)
+   */
+  async function startJarvisPlannerCycle_DEPRECATED(executorSessionId, sessionManager, io) {
+    try {
+      console.log(`🤖 JARVIS: Starting Planner cycle for executor session: ${executorSessionId}`);
+
+      // Get the executor session details
+      const executorSession = sessionManager.getSession(executorSessionId);
+      if (!executorSession) {
+        console.error(`❌ JARVIS: Executor session ${executorSessionId} not found`);
+        return;
+      }
+
+      if (!executorSession.claudeSessionId) {
+        console.error(`❌ JARVIS: Executor session ${executorSessionId} has no Claude session to clone`);
+        return;
+      }
+
+      // Generate new IDs for the Planner session
+      const timestamp = Date.now();
+      const plannerHollerSessionId = `jarvis-planner-${timestamp}`;
+      const plannerClaudeSessionId = generateUUID();
+      const plannerTerminalId = `jarvis-terminal-${timestamp}`;
+
+      console.log(`🧬 JARVIS: Cloning session ${executorSession.claudeSessionId} → ${plannerClaudeSessionId}`);
+
+      // Clone the conversation using existing method
+      const cloneResult = await fetch('http://localhost:3002/api/sessions/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          originalClaudeSessionId: executorSession.claudeSessionId,
+          newClaudeSessionId: plannerClaudeSessionId
+        })
+      });
+
+      if (!cloneResult.ok) {
+        const errorData = await cloneResult.json();
+        throw new Error(errorData.error || 'Failed to clone conversation for Planner');
+      }
+
+      const cloneData = await cloneResult.json();
+      console.log(`✅ JARVIS: Conversation cloned successfully: ${cloneData.messageCount} messages`);
+
+      // Create Planner Holler session
+      const plannerSession = {
+        id: plannerHollerSessionId,
+        name: `🤖 Jarvis Planner (${executorSession.name})`,
+        terminalId: plannerTerminalId,
+        claudeSessionId: plannerClaudeSessionId,
+        created: new Date().toISOString(),
+        projectPath: executorSession.projectPath || '/Users/joshuamullet/code/holler',
+        isJarvisPlanner: true,
+        parentExecutorSession: executorSessionId
+      };
+
+      // Add Planner session to session manager
+      sessionManager.addSession(plannerSession);
+
+      // Launch Planner session with comprehensive prompt
+      await launchPlannerSession(plannerSession, io);
+
+      console.log(`🚀 JARVIS: Planner cycle started successfully: ${plannerHollerSessionId}`);
+
+    } catch (error) {
+      console.error('❌ JARVIS: Error starting Planner cycle:', error);
+    }
+  }
+
+  /**
+   * 🧠 JARVIS: Launch Planner session with comprehensive prompt
+   */
+  async function launchPlannerSession(plannerSession, io) {
+    try {
+      console.log(`🧠 JARVIS: Launching Planner session: ${plannerSession.id}`);
+
+      // Emit session creation to establish terminal connection
+      io.emit('session:created', plannerSession);
+
+      // Wait a moment for terminal to be ready, then start the Claude session
+      setTimeout(async () => {
+        await startClaudeSessionInTerminal(plannerSession, io);
+      }, 2000); // 2 second delay to ensure terminal is ready
+
+      console.log(`✅ JARVIS: Planner session launched: ${plannerSession.id}`);
+
+    } catch (error) {
+      console.error('❌ JARVIS: Error launching Planner session:', error);
+    }
+  }
+
+  /**
+   * 🧠 JARVIS: Start Claude session in terminal for Planner
+   */
+  async function startClaudeSessionInTerminal(plannerSession, io) {
+    try {
+      console.log(`🔥 JARVIS: Starting Claude session in terminal for: ${plannerSession.id}`);
+      console.log(`🔥 JARVIS: Using terminal ID: ${plannerSession.terminalId}`);
+
+      // Wait for terminal to be actually created by polling
+      const maxAttempts = 20; // 10 seconds max
+      let attempts = 0;
+
+      const waitForTerminal = () => {
+        return new Promise((resolve, reject) => {
+          const checkTerminal = () => {
+            attempts++;
+            console.log(`🔍 JARVIS: Checking for terminal (attempt ${attempts}/${maxAttempts})`);
+
+            const terminalExists = terminalManager.terminals.has(plannerSession.terminalId);
+
+            if (terminalExists) {
+              console.log(`✅ JARVIS: Terminal found: ${plannerSession.terminalId}`);
+              resolve(true);
+            } else if (attempts >= maxAttempts) {
+              console.error(`❌ JARVIS: Terminal not found after ${maxAttempts} attempts`);
+              console.log(`🔍 JARVIS: Available terminals:`, Array.from(terminalManager.terminals.keys()));
+              reject(new Error('Terminal not found'));
+            } else {
+              setTimeout(checkTerminal, 500); // Check every 500ms
             }
-          }).filter(msg => msg !== null);
-          
-          if (messageObjects.length > 0) {
-            conversationContext = `\n\n## 📋 CONVERSATION CONTEXT\nHere are the message objects from the Executor session:\n\n${messageObjects.join('\n\n')}\n\n`;
-            console.log(`🐛 JARVIS CONTEXT DEBUG: Successfully loaded ${messageObjects.length} message objects`);
+          };
+
+          checkTerminal();
+        });
+      };
+
+      // Wait for terminal to be ready
+      await waitForTerminal();
+
+      // Send the holler command to start a fresh Claude session (cloned conversation will be in the prompt)
+      const hollerCommand = `holler\n`;
+      console.log(`💻 JARVIS: Executing command: ${hollerCommand.trim()}`);
+
+      const success = terminalManager.writeToTerminal(plannerSession.terminalId, hollerCommand);
+
+      if (!success) {
+        console.error(`❌ JARVIS: Failed to write to terminal ${plannerSession.terminalId}`);
+        console.log(`🔍 JARVIS: Available terminals:`, Array.from(terminalManager.terminals.keys()));
+        return;
+      }
+
+      // Wait a moment for Claude to start, then send the Planner prompt
+      setTimeout(async () => {
+        await sendPlannerPrompt(plannerSession, io);
+      }, 5000); // 5 second delay for Claude to fully load
+
+      console.log(`✅ JARVIS: Claude session started in terminal: ${plannerSession.id}`);
+
+    } catch (error) {
+      console.error('❌ JARVIS: Error starting Claude session in terminal:', error);
+    }
+  }
+
+  /**
+   * 🎯 JARVIS: Send comprehensive Planner prompt with conversation context
+   */
+  async function sendPlannerPrompt(plannerSession, io) {
+    try {
+      console.log(`🎯 JARVIS: Sending Planner prompt to session: ${plannerSession.id}`);
+
+      // Get conversation context from the cloned session
+      let conversationContext = "";
+      try {
+        const SessionManager = require('/Users/joshuamullet/code/holler/holler-next/lib/SessionManager');
+        const sessionManager = new SessionManager();
+        const claudeProjectDir = sessionManager.getClaudeProjectDir();
+        const fs = require('fs');
+        const path = require('path');
+
+        console.log(`🐛 JARVIS CONTEXT DEBUG: claudeProjectDir = ${claudeProjectDir}`);
+        console.log(`🐛 JARVIS CONTEXT DEBUG: plannerSession.claudeSessionId = ${plannerSession.claudeSessionId}`);
+
+        const clonedFile = path.join(claudeProjectDir, `${plannerSession.claudeSessionId}.jsonl`);
+        console.log(`🐛 JARVIS CONTEXT DEBUG: Looking for cloned file at: ${clonedFile}`);
+        console.log(`🐛 JARVIS CONTEXT DEBUG: File exists? ${fs.existsSync(clonedFile)}`);
+
+        if (fs.existsSync(clonedFile)) {
+          const content = fs.readFileSync(clonedFile, 'utf8');
+          console.log(`🐛 JARVIS CONTEXT DEBUG: File content length: ${content.length}`);
+
+          const lines = content.trim().split('\n').filter(line => line.trim());
+          console.log(`🐛 JARVIS CONTEXT DEBUG: Found ${lines.length} lines in conversation`);
+
+          if (lines.length > 0) {
+            // Extract all message objects (no limit, keep it simple)
+            const messageObjects = lines.map(line => {
+              try {
+                const entry = JSON.parse(line);
+
+                // Just extract the message object if it exists, with cleanup
+                if (entry.message) {
+                  const cleanMessage = { ...entry.message };
+
+                  // Remove metadata fields that clutter the context
+                  delete cleanMessage.id;
+                  delete cleanMessage.model;
+                  delete cleanMessage.stop_reason;
+                  delete cleanMessage.stop_sequence;
+                  delete cleanMessage.usage;
+
+                  return JSON.stringify(cleanMessage, null, 2);
+                }
+
+                console.log(`🐛 JARVIS CONTEXT DEBUG: Skipped entry (no message field), type: ${entry.type}`);
+                return null;
+              } catch (e) {
+                console.log(`🐛 JARVIS CONTEXT DEBUG: Failed to parse line: ${e.message}`);
+                return null;
+              }
+            }).filter(msg => msg !== null);
+
+            if (messageObjects.length > 0) {
+              conversationContext = `\n\n## 📋 CONVERSATION CONTEXT\nHere are the message objects from the Executor session:\n\n${messageObjects.join('\n\n')}\n\n`;
+              console.log(`🐛 JARVIS CONTEXT DEBUG: Successfully loaded ${messageObjects.length} message objects`);
+            } else {
+              conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned file found but no readable messages - proceeding without context.\n\n";
+              console.log(`🐛 JARVIS CONTEXT DEBUG: File found but no readable messages`);
+            }
           } else {
-            conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned file found but no readable messages - proceeding without context.\n\n";
-            console.log(`🐛 JARVIS CONTEXT DEBUG: File found but no readable messages`);
+            conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned file is empty - proceeding without context.\n\n";
+            console.log(`🐛 JARVIS CONTEXT DEBUG: File found but empty`);
           }
         } else {
-          conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned file is empty - proceeding without context.\n\n";
-          console.log(`🐛 JARVIS CONTEXT DEBUG: File found but empty`);
+          conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned session file not found - proceeding without context.\n\n";
+          console.log(`🐛 JARVIS CONTEXT DEBUG: Cloned file does not exist`);
         }
-      } else {
-        conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nCloned session file not found - proceeding without context.\n\n";
-        console.log(`🐛 JARVIS CONTEXT DEBUG: Cloned file does not exist`);
+      } catch (error) {
+        console.error('❌ JARVIS: Error reading conversation context:', error);
+        conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nUnable to load conversation history - proceed based on available context.\n\n";
       }
-    } catch (error) {
-      console.error('❌ JARVIS: Error reading conversation context:', error);
-      conversationContext = "\n\n## ⚠️ CONVERSATION CONTEXT\nUnable to load conversation history - proceed based on available context.\n\n";
-    }
 
-    const plannerPrompt = `
+      const plannerPrompt = `
 🤖 **JARVIS MODE: You are now the PLANNER AGENT**
 ${conversationContext}
 ## Your Role
 You are a collaborative planning partner building an execution plan with the user. Your job is to:
 
 1. **Analyze the conversation context** - Look at the last user request and Claude's response
-2. **Build/update the plan** in holler-sessions.json for the next Executor session
+2. **Build/update the plan** in holler-plans.json for the next Executor session
 3. **Research files when needed** to understand the codebase and context
 4. **Collaborate with user** to refine the plan together
 
 ## Plan Management
-You must manage the plan in the holler-sessions.json file:
+You must manage the plan in the holler-plans.json file:
 
-**File Location:** /Users/joshuamullet/code/holler/holler-sessions.json
+**File Location:** /Users/joshuamullet/code/holler/holler-plans.json
 **Your Session ID:** ${plannerSession.parentExecutorSession}
 
 **Instructions:**
@@ -1266,7 +1591,7 @@ You must manage the plan in the holler-sessions.json file:
 ## Workflow
 
 1. **Quick Analysis**: Analyze the conversation - what did Claude do vs what was requested?
-2. **Initial Plan**: Create/update the plan in holler-sessions.json with your findings
+2. **Initial Plan**: Create/update the plan using CLI scripts with your findings
 3. **Collaborate**: Discuss the plan with the user, refine based on their feedback
 4. **Final Plan**: Keep updating the plan until it's ready for execution
 
@@ -1279,7 +1604,7 @@ The plan should be a clear, actionable prompt that a fresh Executor Claude sessi
 - Note any constraints or requirements
 
 ## Important Notes
-- Always update the plan in holler-sessions.json after analysis
+- Always update the plan using CLI scripts after analysis
 - Keep responses short and decision-focused
 - The plan is the deliverable - make it comprehensive for the Executor
 
@@ -1288,38 +1613,38 @@ The plan should be a clear, actionable prompt that a fresh Executor Claude sessi
 **Start by analyzing what happened in the last conversation and creating an initial plan.**
 `;
 
-    // 🐛 DEBUG: Write prompt to debug file for troubleshooting
-    try {
-      const fs = require('fs');
-      const path = require('path');
-      const debugDir = '/Users/joshuamullet/code/holler/holler-next/debug';
-      
-      // Ensure debug directory exists
-      if (!fs.existsSync(debugDir)) {
-        fs.mkdirSync(debugDir, { recursive: true });
-      }
-      
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const debugFile = path.join(debugDir, `planner-prompt-${timestamp}.txt`);
-      
-      // Read the raw cloned file content for debugging
-      let rawClonedFileContent = 'No cloned file found';
+      // 🐛 DEBUG: Write prompt to debug file for troubleshooting
       try {
-        const SessionManager = require('/Users/joshuamullet/code/holler/holler-next/lib/SessionManager');
-        const sessionManager = new SessionManager();
-        const claudeProjectDir = sessionManager.getClaudeProjectDir();
-        const clonedFile = path.join(claudeProjectDir, `${plannerSession.claudeSessionId}.jsonl`);
-        
-        if (fs.existsSync(clonedFile)) {
-          rawClonedFileContent = fs.readFileSync(clonedFile, 'utf8');
-        } else {
-          rawClonedFileContent = `File not found at: ${clonedFile}`;
-        }
-      } catch (error) {
-        rawClonedFileContent = `Error reading file: ${error.message}`;
-      }
+        const fs = require('fs');
+        const path = require('path');
+        const debugDir = '/Users/joshuamullet/code/holler/holler-next/debug';
 
-      const debugContent = `
+        // Ensure debug directory exists
+        if (!fs.existsSync(debugDir)) {
+          fs.mkdirSync(debugDir, { recursive: true });
+        }
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const debugFile = path.join(debugDir, `planner-prompt-${timestamp}.txt`);
+
+        // Read the raw cloned file content for debugging
+        let rawClonedFileContent = 'No cloned file found';
+        try {
+          const SessionManager = require('/Users/joshuamullet/code/holler/holler-next/lib/SessionManager');
+          const sessionManager = new SessionManager();
+          const claudeProjectDir = sessionManager.getClaudeProjectDir();
+          const clonedFile = path.join(claudeProjectDir, `${plannerSession.claudeSessionId}.jsonl`);
+
+          if (fs.existsSync(clonedFile)) {
+            rawClonedFileContent = fs.readFileSync(clonedFile, 'utf8');
+          } else {
+            rawClonedFileContent = `File not found at: ${clonedFile}`;
+          }
+        } catch (error) {
+          rawClonedFileContent = `Error reading file: ${error.message}`;
+        }
+
+        const debugContent = `
 === JARVIS PLANNER DEBUG ===
 Timestamp: ${new Date().toISOString()}
 Planner Session ID: ${plannerSession.id}
@@ -1338,57 +1663,61 @@ ${rawClonedFileContent}
 
 === END DEBUG ===
 `;
-      
-      fs.writeFileSync(debugFile, debugContent);
-      console.log(`🐛 JARVIS DEBUG: Prompt written to ${debugFile}`);
-      
-    } catch (debugError) {
-      console.error('❌ JARVIS DEBUG: Failed to write debug file:', debugError);
-    }
 
-    // Send the prompt to the Planner session terminal (like the test message button)
-    console.log(`📤 JARVIS: Sending prompt to terminal ${plannerSession.terminalId}`);
-    
-    // Method 1: Write to terminal display (paste the text)
-    const displaySuccess = terminalManager.writeToTerminal(plannerSession.terminalId, plannerPrompt);
-    
-    // Method 2: Send as actual input through socket (actually send it)
-    setTimeout(() => {
-      console.log(`🚀 JARVIS: Sending prompt as terminal input to ${plannerSession.terminalId}`);
-      io.emit('terminal:output', plannerSession.terminalId, '\r'); // Enter key to send
-      
-      // Also trigger the terminal input handler directly
-      const terminal = terminalManager.getTerminal(plannerSession.terminalId);
-      if (terminal && terminal.ptyProcess) {
-        terminal.ptyProcess.write('\r'); // Send enter through PTY
+        fs.writeFileSync(debugFile, debugContent);
+        console.log(`🐛 JARVIS DEBUG: Prompt written to ${debugFile}`);
+
+      } catch (debugError) {
+        console.error('❌ JARVIS DEBUG: Failed to write debug file:', debugError);
       }
-    }, 1000); // 1 second delay for the big paste to settle
-    
-    if (displaySuccess) {
-      console.log(`✅ JARVIS: Planner prompt pasted and sent to ${plannerSession.id}`);
-    } else {
-      console.error(`❌ JARVIS: Failed to paste Planner prompt to ${plannerSession.id}`);
+
+      // Send the prompt to the Planner session terminal (like the test message button)
+      console.log(`📤 JARVIS: Sending prompt to terminal ${plannerSession.terminalId}`);
+
+      // Method 1: Write to terminal display (paste the text)
+      const displaySuccess = terminalManager.writeToTerminal(plannerSession.terminalId, plannerPrompt);
+
+      // Method 2: Send as actual input through socket (actually send it)
+      setTimeout(() => {
+        console.log(`🚀 JARVIS: Sending prompt as terminal input to ${plannerSession.terminalId}`);
+        io.emit('terminal:output', plannerSession.terminalId, '\r'); // Enter key to send
+
+        // Also trigger the terminal input handler directly
+        const terminal = terminalManager.getTerminal(plannerSession.terminalId);
+        if (terminal && terminal.ptyProcess) {
+          terminal.ptyProcess.write('\r'); // Send enter through PTY
+        }
+      }, 1000); // 1 second delay for the big paste to settle
+
+      if (displaySuccess) {
+        console.log(`✅ JARVIS: Planner prompt pasted and sent to ${plannerSession.id}`);
+      } else {
+        console.error(`❌ JARVIS: Failed to paste Planner prompt to ${plannerSession.id}`);
+      }
+
+    } catch (error) {
+      console.error('❌ JARVIS: Error sending Planner prompt:', error);
     }
-
-  } catch (error) {
-    console.error('❌ JARVIS: Error sending Planner prompt:', error);
   }
-}
 
 
-/**
- * Generate UUID helper function
- */
-function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-    const r = Math.random() * 16 | 0;
-    const v = c == 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
-}
+  /**
+   * Generate UUID helper function
+   */
+  function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+      const r = Math.random() * 16 | 0;
+      const v = c == 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
 
   io.on('connection', (socket) => {
-    console.log('🔌 Client connected:', socket.id);
+    console.log(`🔗 CONNECT: ${socket.id} at ${new Date().toISOString()}`);
+
+    socket.on('disconnect', (reason) => {
+      console.log(`🔌 DISCONNECT: ${socket.id} - Reason: ${reason} at ${new Date().toISOString()}`);
+    });
     let currentTerminal = null;
 
     socket.on('terminal:create', (sessionId) => {
@@ -1484,7 +1813,7 @@ function generateUUID() {
                 setTimeout(() => {
                   const projectPath = findSessionProjectPath(hollerSession.claudeSessionId);
                   const hollerCmd = `holler --resume ${hollerSession.claudeSessionId} --project-path "${projectPath}"`;
-                  console.log(`🚀 Sending resume command: ${hollerCmd}`);
+                  // console.log(`🚀 Sending resume command: ${hollerCmd}`);
                   terminalManager.writeToTerminal(sessionId, `${hollerCmd}\n`);
                 }, 500);
               }, 100);
@@ -1499,7 +1828,13 @@ function generateUUID() {
     });
 
     socket.on('terminal:input', async (sessionId, data) => {
-      console.log(`📝 Input for ${sessionId}: ${data.length} chars`);
+      // 🔍 MESSAGE SEND DETECTION: Only log when user sends complete message
+      if (data.includes('\r') || data.includes('\n')) {
+        const hollerSession = sessionManager.getSession(sessionId);
+        console.log(`🚀 OUTGOING: User sent message from Holler session ${sessionId}`);
+        console.log(`📋 OUTGOING: Session name: ${hollerSession?.name || 'Unknown'}`);
+        console.log(`🔗 OUTGOING: Linked Claude session: ${hollerSession?.claudeSessionId || 'None'}`);
+      }
 
       // Check if this is a session that needs Claude session linking
       const hollerSession = sessionManager.getSession(sessionId);
@@ -1538,10 +1873,10 @@ function generateUUID() {
     // New event for executing commands in terminal (for Jarvis execution)
     socket.on('terminal:execute', (terminalId, command) => {
       console.log(`🚀 JARVIS: Executing command in terminal ${terminalId}: ${command.substring(0, 50)}...`);
-      
+
       // Write the command
       const success = terminalManager.writeToTerminal(terminalId, command + '\n');
-      
+
       if (success) {
         // Send enter through PTY after a delay (like existing Jarvis mode)
         setTimeout(() => {
@@ -1552,24 +1887,24 @@ function generateUUID() {
           }
         }, 1000);
       }
-      
+
       socket.emit('terminal:execute:response', { success, terminalId, command: command.substring(0, 100) });
     });
 
     // New endpoint for scheduled execution (solves script blocking issue)
     socket.on('schedule:execution', (data) => {
       const { terminalId, delaySeconds, command } = data;
-      
+
       console.log(`📅 JARVIS: Scheduling execution for terminal ${terminalId}`);
       console.log(`⏰ Command: "${command.substring(0, 50)}..." in ${delaySeconds} seconds`);
-      
+
       // Schedule the command execution
       setTimeout(() => {
         console.log(`🚀 JARVIS: Executing scheduled command for terminal ${terminalId}`);
-        
+
         // Write the command
         const success = terminalManager.writeToTerminal(terminalId, command + '\n');
-        
+
         if (success) {
           // Send enter through PTY after a delay (like existing Jarvis mode)
           setTimeout(() => {
@@ -1580,14 +1915,14 @@ function generateUUID() {
             }
           }, 1000);
         }
-        
+
         console.log(`✅ JARVIS: Scheduled command executed - ${success ? 'Success' : 'Failed'}`);
       }, delaySeconds * 1000);
-      
+
       // Immediately respond that scheduling was successful
-      socket.emit('schedule:execution:response', { 
-        success: true, 
-        terminalId, 
+      socket.emit('schedule:execution:response', {
+        success: true,
+        terminalId,
         delaySeconds,
         command: command.substring(0, 100),
         message: `Command scheduled for execution in ${delaySeconds} seconds`
@@ -1662,7 +1997,6 @@ function generateUUID() {
             name: sessionData.name,
             projectPath: sessionData.projectPath
           });
-          console.log('✅ Session created successfully:', session.id);
 
           // Create terminal for this session
           const terminal = terminalManager.createTerminal(session.terminalId, session.claudeSessionId);
@@ -1798,6 +2132,16 @@ function generateUUID() {
         }
       }
     });
+  });
+
+  // Add server error handling for disconnect debugging
+  process.on('uncaughtException', (error) => {
+    console.log(`💥 SERVER CRASH: ${error.message}`);
+    console.error(error.stack);
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.log(`💥 UNHANDLED REJECTION: ${reason}`);
   });
 
   server.listen(port, (err) => {

@@ -12,44 +12,59 @@
 const fs = require('fs');
 const path = require('path');
 const io = require('socket.io-client');
+const SessionManager = require('../lib/SessionManager');
 
-const SESSIONS_FILE = '/Users/joshuamullet/code/holler/holler-sessions.json';
 const HOLLER_SERVER_URL = 'http://localhost:3002';
 
 async function executeJarvisPlan() {
     try {
         console.log('🚀 JARVIS: Starting plan execution workflow...');
         
-        // 1. Read and update holler-sessions.json
-        const sessionsData = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-        const activeSessionId = sessionsData.activeSessionId;
+        // 1. Get active session from SQLite
+        const sessionManager = new SessionManager();
+        const activeSessionId = sessionManager.getActiveSessionId();
         
-        // Find active Jarvis session
-        const activeSession = sessionsData.sessions.find(s => 
-            s.id === activeSessionId && s.jarvisMode === true
-        );
+        if (!activeSessionId) {
+            console.log('❌ No active session found');
+            return;
+        }
         
+        // Get the active session
+        const activeSession = sessionManager.getSession(activeSessionId);
         if (!activeSession) {
-            console.log('❌ No active Jarvis session found');
+            console.log('❌ Active session not found in database');
+            console.log('🔍 DEBUG: activeSessionId:', activeSessionId);
+            return;
+        }
+        
+        // Verify it's a Jarvis session
+        if (!activeSession.jarvisMode) {
+            console.log('❌ Active session is not in Jarvis mode');
             return;
         }
         
         const plan = activeSession.plan;
         if (!plan) {
-            console.log('❌ No plan found in active session');
+            console.log('❌ No plan found for active session');
+            console.log('🔍 DEBUG: activeSession:', JSON.stringify(activeSession, null, 2));
             return;
         }
         
         console.log(`🎯 Found active Jarvis session: ${activeSession.name}`);
         console.log(`📋 Plan length: ${plan.length} characters`);
         
-        // 2. Update mode to execution
-        activeSession.mode = 'execution';
-        activeSession.lastUpdated = new Date().toISOString();
-        
-        // Save updated sessions
-        fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessionsData, null, 2));
+        // 2. Update mode to execution and clear session correlation for fresh start
+        const updated = sessionManager.db.updateSession(activeSessionId, {
+            mode: 'execution',
+            claudeSessionId: null,
+            lastUuid: null
+        });
+        if (!updated) {
+            console.log('❌ Failed to update session mode to execution');
+            return;
+        }
         console.log('✅ Updated session mode to execution');
+        console.log('✅ Cleared claudeSessionId and lastUuid for fresh session correlation');
         
         // 3. Build execution prompt
         const executionPrompt = `/clear
@@ -74,7 +89,29 @@ ${plan}
 
 **BEGIN EXECUTION NOW**`;
 
-        // 4. Connect to Holler server and inject messages
+        // 4. Store execution session mapping for completion detection
+        console.log('💾 Storing execution session mapping...');
+        const executionMapping = {
+            hollerSessionId: activeSession.id,
+            terminalId: activeSession.terminalId,
+            startTime: new Date().toISOString()
+        };
+        
+        // Store mapping for completion detection (simple file-based approach)
+        const mappingFile = '/Users/joshuamullet/code/holler/holler-next/execution-mappings.json';
+        let mappings = {};
+        try {
+            mappings = JSON.parse(fs.readFileSync(mappingFile, 'utf8'));
+        } catch (e) {
+            // File doesn't exist yet, start fresh
+        }
+        
+        // We'll update this with the actual execution session ID after it starts
+        mappings.pendingExecution = executionMapping;
+        fs.writeFileSync(mappingFile, JSON.stringify(mappings, null, 2));
+        console.log('✅ Execution mapping stored for completion detection');
+
+        // 5. Connect to Holler server and inject messages
         console.log('🔌 Connecting to Holler server...');
         const socket = io(HOLLER_SERVER_URL);
         
