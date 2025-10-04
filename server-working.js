@@ -20,6 +20,12 @@ const port = process.env.PORT || 3002;
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
+// 🎯 EXECUTION COMPLETION DETECTION: CPU time monitoring per Claude PID
+const executionCompletionTimers = new Map(); // sessionId -> timerId (legacy fallback)
+const networkActivityMonitors = new Map(); // claudePid -> intervalId
+const executionSessionsWaitingForResponse = new Map(); // sessionId -> { claudePid, startTime, terminalId }
+const consecutiveIdleChecks = new Map(); // sessionId -> count of consecutive idle checks
+
 // PROVEN PATTERN: Direct PTY management like node-pty example
 class WorkingTerminalManager {
   constructor() {
@@ -28,17 +34,13 @@ class WorkingTerminalManager {
 
   createTerminal(sessionId, claudeSessionId = null) {
     if (this.terminals.has(sessionId)) {
-      console.log(`🔄 Reusing existing terminal: ${sessionId}`);
       return this.terminals.get(sessionId);
     }
-
-    console.log(`🚀 Creating new terminal: ${sessionId}${claudeSessionId ? ` with Claude session: ${claudeSessionId}` : ''}`);
 
     // Create environment with CLAUDE_SESSION_ID for CLAUDE.md routing
     const terminalEnv = { ...process.env };
     if (claudeSessionId) {
       terminalEnv.CLAUDE_SESSION_ID = claudeSessionId;
-      console.log(`🎯 Setting CLAUDE_SESSION_ID=${claudeSessionId} for automatic project routing`);
     }
 
 
@@ -62,7 +64,6 @@ class WorkingTerminalManager {
     this.terminals.set(sessionId, terminalData);
 
 
-    console.log(`✅ Terminal created with PID: ${ptyProcess.pid}`);
     return terminalData;
   }
 
@@ -84,23 +85,19 @@ class WorkingTerminalManager {
     const terminal = this.terminals.get(sessionId);
     if (terminal && terminal.ptyProcess) {
       terminal.ptyProcess.resize(cols, rows);
-      console.log(`📏 Resized terminal ${sessionId} to ${cols}x${rows}`);
     }
   }
 
   killTerminal(sessionId) {
     const terminal = this.terminals.get(sessionId);
     if (terminal) {
-      console.log(`🗑️ Killing terminal: ${sessionId}`);
       terminal.ptyProcess.kill();
       this.terminals.delete(sessionId);
     }
   }
 
   listTerminals() {
-    const terminalIds = Array.from(this.terminals.keys());
-    console.log(`📋 Listing terminals: ${terminalIds.length} found`, terminalIds);
-    return terminalIds;
+    return Array.from(this.terminals.keys());
   }
 
   /**
@@ -201,7 +198,7 @@ function findSessionProjectPath(claudeSessionId) {
 
 // 🎯 CONTENT-MATCHING SESSION TRACKER
 function findActiveClaudeSession(messageContent, hollerSessionId) {
-  console.log(`🔍 CONTENT SEARCH: Looking for message content to find active Claude session for ${hollerSessionId}`);
+  // Looking for message content to find active Claude session
 
   try {
     const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
@@ -222,16 +219,14 @@ function findActiveClaudeSession(messageContent, hollerSessionId) {
       const grepResult = execSync(grepCommand, { encoding: 'utf8' });
       matchingFiles = grepResult.trim().split('\n').filter(file => file.length > 0);
     } catch (error) {
-      console.log(`📝 No existing sessions found for message content (new conversation)`);
       return null;
     }
 
     if (matchingFiles.length === 0) {
-      console.log(`📝 No session files found containing message content`);
       return null;
     }
 
-    console.log(`🔍 Found message in ${matchingFiles.length} session files:`, matchingFiles);
+    // Found message in session files
 
     // Get file modification times and find most recent
     const fileStats = matchingFiles.map(filePath => {
@@ -249,15 +244,9 @@ function findActiveClaudeSession(messageContent, hollerSessionId) {
     fileStats.sort((a, b) => b.modifiedTime - a.modifiedTime);
 
     const activeSession = fileStats[0];
-    console.log(`🎯 ACTIVE SESSION DETECTED: ${activeSession.sessionId} (modified: ${activeSession.modifiedTime.toISOString()})`);
+    // Active session detected
 
-    // Log other candidates for debugging
-    if (fileStats.length > 1) {
-      console.log(`📊 Other session candidates:`);
-      fileStats.slice(1).forEach((file, index) => {
-        console.log(`   ${index + 2}. ${file.sessionId} (modified: ${file.modifiedTime.toISOString()})`);
-      });
-    }
+    // Other session candidates available
 
     return activeSession.sessionId;
 
@@ -274,13 +263,7 @@ function findActiveClaudeSession(messageContent, hollerSessionId) {
 function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager) {
   // Add event listeners for auto-correlation and status updates
   fileMonitor.on('sessionStart', async (event) => {
-    const logMessage = `${new Date().toISOString()} 🚀 FILE MONITOR: New session detected: ${event.sessionId}`;
-    console.log(logMessage);
-    fs.appendFileSync('/tmp/file-monitor-test.log', logMessage + '\n');
-
-    // 🚨 DISABLED: Old creation-time-based correlation caused session cross-contamination
-    // sessionStart correlation replaced by message-content-based correlation in userPromptSubmit
-    console.log(`📝 SESSION START: New Claude session ${event.sessionId} detected, waiting for user message to determine correct Holler session linkage`);
+    // New Claude session detected, waiting for user message to determine linkage
 
     // SQLite-only: No need to reload, data is always current
   });
@@ -288,7 +271,6 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
   // 🔗 NEW: PARENT UUID CHAIN CORRELATION - Handle every message for correlation
   fileMonitor.on('correlationRequest', async (event) => {
     try {
-      console.log(`🔗 CORRELATION REQUEST: ${event.sessionId} (${event.messageType})`);
 
       // Call the new correlation function
       const linkedSession = await correlateByParentUuidChain(
@@ -298,20 +280,13 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
         sessionManager,
         io
       );
-
-      if (linkedSession) {
-        console.log(`✅ CORRELATION SUCCESS: Linked to Holler session ${linkedSession.id}`);
-      }
     } catch (error) {
       console.error('❌ CORRELATION REQUEST ERROR:', error);
     }
   });
 
   fileMonitor.on('userPromptSubmit', async (event) => {
-    const logMessage = `💬 FILE MONITOR: User message in session: ${event.sessionId}`;
-    // console.log('event ✊:', event)
-    console.log(logMessage);
-    fs.appendFileSync('/tmp/file-monitor-test.log', logMessage + '\n');
+    // User message in session
 
     // 🎯 STEP 1: RUN CORRELATION FIRST - Find which Holler session should be linked
     let linkedHollerSession = null;
@@ -340,8 +315,6 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
 
               if (messageContent.trim().length > 10 && !messageContent.includes('/Users/joshuamullet/code')) { // Only track substantial messages, ignore project paths
                 // 🚫 DISABLED: Auto-correlation (infinite loop source) 
-                console.log(`🔍 CORRELATION: User message detected in Claude session ${event.sessionId}`);
-                console.log(`📝 CORRELATION: Message content: "${messageContent.substring(0, 50)}..."`);
                 break; // Found user message, don't need to check other lines
               }
             }
@@ -361,8 +334,6 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
         claudeSessionId: event.sessionId,
         status: 'loading' // Yellow + pulse
       });
-    } else {
-      console.log(`⚠️ STATUS: No Holler session linked for Claude session ${event.sessionId}, skipping status update`);
     }
   });
 
@@ -381,23 +352,17 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
       hollerSession = await checkForExecutionSession(event.sessionId, sessionManager);
     }
 
-    console.log(`🛑 Stop event received:`, {
-      sessionId: event.sessionId,
-      isComplete: event.isComplete,
-      timestamp: event.timestamp,
-      hollerSessionFound: !!hollerSession,
-      hollerSessionId: hollerSession?.id
-    });
+    // Stop event received
 
     // 🟢 STATUS UPDATE: Claude finished response, ready for user input  
     if (event.isComplete) {
-      console.log(`🟢 STATUS: Claude session ${event.sessionId} → READY (green)`);
+      // Claude session ready
       io.emit('session:status-update', {
         claudeSessionId: event.sessionId,
         status: 'ready' // Green
       });
 
-      console.log(`✅ AUTONOMOUS DEBUG: Response is complete, checking for autonomous mode...`);
+      // Check for autonomous mode
 
       // SQLite-only: Data is always current, no reload needed
 
@@ -405,27 +370,15 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
       const hollerSession = sessionManager.getAllSessions()
         .find(session => session.claudeSessionId === event.sessionId);
 
-      console.log(`🔍 AUTONOMOUS DEBUG: Found holler session:`, hollerSession ? {
-        id: hollerSession.id,
-        name: hollerSession.name,
-        claudeSessionId: hollerSession.claudeSessionId,
-        autonomousMode: hollerSession.autonomousMode
-      } : 'NOT FOUND');
+      // Found holler session
 
       if (hollerSession && hollerSession.autonomousMode) {
-        console.log(`🤖 AUTONOMOUS MODE ACTIVE: Sending test response for session ${hollerSession.id}`);
-        console.log(`🔍 AUTONOMOUS DEBUG: Terminal ID: ${hollerSession.terminalId}`);
-
         // Generate test message with counter
         const testMessage = `🤖 Autonomous test response ${Date.now()} - Observer AI responding automatically`;
-        console.log(`🔍 AUTONOMOUS DEBUG: Generated message: "${testMessage}"`);
 
         try {
-          console.log(`🚀 AUTONOMOUS DEBUG: Waiting 1 second for Claude CLI to settle...`);
-
           // Add delay to let Claude CLI fully settle before sending autonomous message
           setTimeout(() => {
-            console.log(`🚀 AUTONOMOUS DEBUG: Now writing to terminal using button's exact sequence...`);
 
             // Use the EXACT same multi-sequence approach as the working button
             // Method 1: Standard newline
@@ -457,26 +410,51 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
           console.error('❌ AUTONOMOUS ERROR:', error);
         }
       } else if (!hollerSession) {
-        console.log(`🔕 AUTONOMOUS DEBUG: No Holler session found for Claude session ${event.sessionId}`);
-        console.log(`🔕 AUTONOMOUS DEBUG: Available sessions:`, sessionManager.getAllSessions().map(s => ({
-          id: s.id,
-          name: s.name,
-          claudeSessionId: s.claudeSessionId,
-          autonomousMode: s.autonomousMode
-        })));
+        // No Holler session found for autonomous mode
       } else if (!hollerSession.autonomousMode) {
-        console.log(`🔕 AUTONOMOUS DEBUG: Session ${hollerSession.id} has autonomousMode: ${hollerSession.autonomousMode}`);
+        // Session autonomous mode check
       }
 
       // Note: Jarvis mode logic moved outside isComplete check to process every message
     }
 
     // 🤖 JARVIS MODE: Process EVERY assistant message for TTS (outside isComplete check)
+    // Check Jarvis mode for TTS
+
     if (hollerSession && hollerSession.jarvisMode && hollerSession.mode === 'planning') {
       handleJarvisPlanningCompletion(hollerSession, event, io);
     } else if (hollerSession && hollerSession.jarvisMode && hollerSession.mode === 'execution') {
       handleJarvisExecutionCompletion(hollerSession, event, io, terminalManager);
+    } else {
+      // Skipping TTS - not in planning mode
     }
+  });
+
+  // 🔊 NEW: IMMEDIATE TTS DETECTION - Handle text content as soon as it appears
+  fileMonitor.on('assistantTextMessage', async (event) => {
+
+    // Find the Holler session for this Claude session
+    const hollerSession = sessionManager.getAllSessions()
+      .find(session => session.claudeSessionId === event.sessionId);
+
+    if (hollerSession && hollerSession.jarvisMode && hollerSession.mode === 'planning') {
+      // Emit TTS event to frontend immediately
+      const ttsPayload = {
+        sessionId: hollerSession.id,
+        text: event.text,
+        timestamp: event.timestamp,
+        messageLength: event.messageLength
+      };
+
+      io.emit('jarvis-tts', ttsPayload);
+    }
+
+  });
+
+  // 🎯 EXECUTION MONITORING: Handle first assistant response for execution sessions
+  fileMonitor.on('assistantFirstResponse', async (event) => {
+    // Call the handler to check if this session is waiting for first response
+    handleFirstExecutionResponse(event.sessionId, event.sessionId);
   });
 }
 
@@ -485,16 +463,15 @@ function setupFileMonitorEvents(fileMonitor, io, sessionManager, terminalManager
  */
 async function handleJarvisPlanningCompletion(hollerSession, event, io) {
   try {
-    console.log(`🎯 JARVIS PLANNING: Processing TTS for session ${hollerSession.id}`);
-
     // Extract the last assistant message from the Claude session
     const lastMessage = await extractLastAssistantMessage(event.sessionId);
 
     if (lastMessage) {
       // Store the message in session data for debugging/TTS
       const session = sessionManager.getSession(hollerSession.id);
+
       if (session) {
-        // 🔧 DEDUPLICATION: Check if this is the same message as last time
+        // Check if this is the same message as last time
         const isDuplicate = session.lastAssistantMessage === lastMessage;
 
         if (!isDuplicate) {
@@ -505,18 +482,26 @@ async function handleJarvisPlanningCompletion(hollerSession, event, io) {
           sessionManager.saveSessions();
 
           // 🔊 TTS: Emit message to frontend for speech synthesis
-          io.emit('jarvis-tts', {
+          const ttsPayload = {
             sessionId: hollerSession.id,
             text: lastMessage,
             timestamp: event.timestamp,
             messageLength: lastMessage.length
-          });
-          console.log(`🔊 JARVIS TTS: Emitted message (${lastMessage.length} chars)`);
+          };
+
+          io.emit('jarvis-tts', ttsPayload);
+          console.log(`🔊 TTS DEBUG: ✅ Successfully emitted jarvis-tts event (${lastMessage.length} chars)`);
         }
+      } else {
+        console.log(`❌ TTS DEBUG: Failed to get session from sessionManager`);
       }
+    } else {
+      console.log(`❌ TTS DEBUG: No message extracted from Claude session`);
     }
+
+    console.log(`🎯 TTS DEBUG: ========== END PLANNING COMPLETION ==========`);
   } catch (error) {
-    console.error(`❌ JARVIS PLANNING ERROR:`, error);
+    console.error(`❌ TTS DEBUG: PLANNING ERROR:`, error);
   }
 }
 
@@ -562,25 +547,18 @@ async function checkForExecutionSession(claudeSessionId, sessionManager) {
  */
 async function handleJarvisExecutionCompletion(hollerSession, event, io, terminalManager) {
   try {
-    console.log(`🔍 EXECUTION-DEBUG: ▶️ ENTERING handleJarvisExecutionCompletion`);
-    console.log(`🔍 EXECUTION-DEBUG: Holler Session ID: ${hollerSession.id}`);
-    console.log(`🔍 EXECUTION-DEBUG: Claude Session ID: ${event.sessionId}`);
-    console.log(`🎯 JARVIS EXECUTION: Execution mode completed for session ${hollerSession.id}`);
-
     // Update session mode from execution → planning
     const session = sessionManager.getSession(hollerSession.id);
     if (session) {
       console.log(`🔄 JARVIS EXECUTION: Switching session ${hollerSession.id} from execution → planning mode`);
       session.mode = 'planning';
       session.lastUpdated = new Date().toISOString();
-      sessionManager.saveSessions();
 
       console.log(`✅ JARVIS EXECUTION: Mode switch complete for session ${hollerSession.id}`);
 
       // Schedule planning prompt injection after a short delay
       setTimeout(async () => {
-        console.log(`🎯 JARVIS EXECUTION: Injecting planning prompt for session ${hollerSession.id}`);
-        await injectPlanningPrompt(hollerSession, terminalManager);
+        await injectPlanningPrompt(hollerSession, terminalManager, io);
       }, 2000); // 2 second delay to ensure execution is fully complete
 
     } else {
@@ -608,9 +586,9 @@ Check for context above to understand what we're working on.`;
   return `${contextIntro}
 
 ## Your Goal
-Create a plan that will be executed by another coding agent. **You do NOT execute the plan yourself.**
+Create a plan that will be handled by another coding agent. **You do NOT code anything yourself.**
 
-Work with the user to build this plan and store it in the database. When they say "go to pound town claude code", execution begins.
+Work with the user to build this plan and store it in the database. When they're ready, the plan will automatically activate.
 
 ## Plan Management Scripts
 **Session ID:** ${sessionId}
@@ -634,19 +612,35 @@ Make the plan actionable for the execution agent:
 /**
  * Inject planning prompt to restart the planning cycle
  */
-async function injectPlanningPrompt(hollerSession, terminalManager) {
+async function injectPlanningPrompt(hollerSession, terminalManager, io) {
   try {
-    console.log(`🎯 JARVIS PLANNING: Injecting planning prompt for session ${hollerSession.id}`);
+    console.log(`\n🎯 JARVIS PLANNING: Injecting planning prompt for session ${hollerSession.id}`);
+    console.log(`📋 PLANNING INJECTION SESSION DETAILS:`);
+    console.log(`   Holler Session ID: ${hollerSession.id}`);
+    console.log(`   Terminal ID: ${hollerSession.terminalId}`);
+    console.log(`   Current Claude Session ID: ${hollerSession.claudeSessionId}`);
+    console.log(`   Mode: ${hollerSession.mode}`);
+    console.log(`   Jarvis Mode: ${hollerSession.jarvisMode}`);
 
     const planningPrompt = buildPlanningPrompt(hollerSession.id, 'post-execution');
+    console.log(`📝 Planning prompt length: ${planningPrompt.length} chars`);
 
     // Send the planning prompt to the terminal
     const terminal = terminalManager.getTerminal(hollerSession.terminalId);
     if (terminal) {
-      console.log(`📝 JARVIS PLANNING: Sending planning prompt to terminal ${hollerSession.terminalId}`);
+      console.log(`✅ Terminal found for ${hollerSession.terminalId}`);
+      console.log(`📤 Writing planning prompt directly to terminal`);
 
-      // Send the prompt as if it's a user message to trigger Claude response
-      await terminal.sendInput(planningPrompt);
+      // Send the prompt directly to terminal
+      terminalManager.writeToTerminal(hollerSession.terminalId, planningPrompt);
+      
+      // Use the WORKING pattern from scheduled command execution
+      setTimeout(() => {
+        console.log(`⚡ JARVIS PLANNING: Sending execution signal to ${hollerSession.terminalId}`);
+        if (terminal && terminal.ptyProcess) {
+          terminal.ptyProcess.write('\r'); // Send enter directly through PTY
+        }
+      }, 1000); // Same delay as working scheduled commands
 
       console.log(`✅ JARVIS PLANNING: Planning prompt injected successfully`);
     } else {
@@ -713,11 +707,9 @@ async function extractLastAssistantMessage(claudeSessionId) {
  */
 async function correlateByParentUuidChain(sessionId, parentUuid, messageUuid, sessionManager, io) {
   try {
-    console.log(`🔗 CHAIN CORRELATION: Processing sessionId=${sessionId}, parentUuid=${parentUuid}`);
 
     // STEP 1: Handle new sessions (no parentUuid)
     if (!parentUuid || parentUuid === null) {
-      console.log(`🆕 NEW SESSION: No parentUuid - creating new session link`);
 
       // Use existing new session logic
       const event = { sessionId, parentUuid, uuid: messageUuid };
@@ -737,8 +729,6 @@ async function correlateByParentUuidChain(sessionId, parentUuid, messageUuid, se
     const matchingSession = matchingSessionId ? sessionManager.getSession(matchingSessionId) : null;
 
     if (matchingSession) {
-      console.log(`🔗 CHAIN MATCH: Found parentUuid in session ${matchingSession.id}`);
-      console.log(`🔄 UPDATING: ${matchingSession.id} claudeSessionId ${matchingSession.claudeSessionId} → ${sessionId}`);
 
       // Update the session's claudeSessionId to current sessionId
       const updateSuccess = sessionManager.updateSessionWithClaude(matchingSession.id, sessionId);
@@ -746,8 +736,6 @@ async function correlateByParentUuidChain(sessionId, parentUuid, messageUuid, se
       if (updateSuccess) {
         // Update correlation manager with current message UUID (hot path)
         correlationManager.updateLastUuid(matchingSession.id, messageUuid);
-
-        console.log(`✅ CHAIN UPDATED: Session ${matchingSession.id} now points to ${sessionId}`);
 
         // Real-time sync
         if (io) {
@@ -1083,6 +1071,248 @@ class ClaudeSessionDiscoveryService {
   }
 }
 
+/**
+ * 🔍 Check network activity for a Claude PID
+ * Returns CPU% and connection count to determine if Claude is active
+ */
+/**
+ * Parse time string (MM:SS.ss or HH:MM:SS) to seconds
+ */
+function parseTimeToSeconds(timeStr) {
+  const parts = timeStr.split(':');
+  if (parts.length === 2) {
+    // MM:SS.ss format
+    return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+  } else if (parts.length === 3) {
+    // HH:MM:SS format  
+    return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
+  }
+  return 0;
+}
+
+/**
+ * Check Claude CPU time for execution completion detection
+ */
+async function checkClaudeCpuTime(claudePid, sessionId, sessionManager) {
+  return new Promise((resolve) => {
+    const { exec } = require('child_process');
+
+    exec(`ps -p ${claudePid} -o time=`, (error, stdout) => {
+      if (error) {
+        resolve({ active: false, cpuTime: null, reason: 'process_not_found' });
+        return;
+      }
+
+      // Parse CPU time (format: MM:SS.ss or HH:MM:SS)
+      const timeStr = stdout.trim();
+      const cpuTimeSeconds = parseTimeToSeconds(timeStr);
+
+      // Get previous reading from database
+      const session = sessionManager.getSession(sessionId);
+      const lastCpuTime = session.lastCpuTime || 0;
+      const lastCheck = session.lastCpuTimeCheck || Date.now();
+
+      // Calculate growth since last check
+      const growth = cpuTimeSeconds - lastCpuTime;
+      const timeSinceCheck = (Date.now() - lastCheck) / 1000;
+
+      // DEBUG: Log the calculation
+      console.log(`🎯 CPU TIME DEBUG: PID ${claudePid} - Raw: "${timeStr}" → ${cpuTimeSeconds}s, Last: ${lastCpuTime}s, Growth: ${growth}s`);
+
+      // Update database with current reading
+      sessionManager.db.updateSession(sessionId, {
+        lastCpuTime: cpuTimeSeconds,
+        lastCpuTimeCheck: Date.now(),
+        lastCpuTimeGrowth: growth
+      });
+
+      // Consider idle if growth <= 0.02 seconds in a 5+ second period
+      const isActive = growth > 0.02;
+
+      resolve({
+        active: isActive,
+        cpuTime: cpuTimeSeconds,
+        growth,
+        timeSinceCheck,
+        reason: isActive ? 'cpu_time_growing' : 'cpu_time_stable'
+      });
+    });
+  });
+}
+
+/**
+ * 🎯 Start CPU time monitoring for execution completion detection
+ */
+function startCpuTimeMonitoring(sessionId, claudePid) {
+  console.log(`🎯 EXEC TRACE: [3/5] ✅ Starting CPU time monitoring - PID ${claudePid}, Session ${sessionId}`);
+
+  // Clear any existing monitor for this PID
+  if (networkActivityMonitors.has(claudePid)) {
+    clearInterval(networkActivityMonitors.get(claudePid));
+    console.log(`🎯 EXEC TRACE: [3/5] Cleared existing monitor for PID ${claudePid}`);
+  }
+
+  // Initialize consecutive idle counter
+  consecutiveIdleChecks.set(sessionId, 0);
+
+  // Check every 5 seconds for CPU time growth
+  const intervalId = setInterval(async () => {
+    const activity = await checkClaudeCpuTime(claudePid, sessionId, sessionManager);
+    console.log(`🎯 EXEC TRACE: [4/5] PID ${claudePid} - CPU time: ${activity.cpuTime}s, Growth: ${activity.growth}s, Active: ${activity.active}`);
+
+    if (!activity.active) {
+      // Increment consecutive idle checks
+      const currentIdle = consecutiveIdleChecks.get(sessionId) || 0;
+      const newIdle = currentIdle + 1;
+      consecutiveIdleChecks.set(sessionId, newIdle);
+
+      console.log(`🎯 EXEC TRACE: [4/5] ⏰ PID ${claudePid} idle check ${newIdle}/3 - need 3 consecutive for completion`);
+
+      // Require 3 consecutive idle checks (15 seconds sustained inactivity)
+      if (newIdle >= 3) {
+        console.log(`🎯 EXEC TRACE: [4/5] 🏁 PID ${claudePid} sustained inactivity for 15s - triggering completion!`);
+
+        // Stop monitoring this PID
+        clearInterval(intervalId);
+        networkActivityMonitors.delete(claudePid);
+        consecutiveIdleChecks.delete(sessionId);
+
+        // Trigger execution completion
+        await handleExecutionCompletion(sessionId);
+      }
+    } else {
+      // Reset idle counter when activity detected
+      consecutiveIdleChecks.set(sessionId, 0);
+      console.log(`🎯 EXEC TRACE: [4/5] 🔥 PID ${claudePid} activity detected - reset idle counter`);
+    }
+  }, 5000); // Check every 5 seconds
+
+  networkActivityMonitors.set(claudePid, intervalId);
+  console.log(`🎯 EXEC TRACE: [3/5] ✅ CPU time monitoring started - checking every 5 seconds`);
+}
+
+/**
+ * 🎯 Register session as waiting for first assistant response
+ */
+function registerExecutionSessionWaitingForResponse(sessionId, claudePid, terminalId) {
+  console.log(`🎯 EXEC TRACE: [1/5] Registering session ${sessionId} as waiting for first assistant response`);
+  console.log(`🎯 EXEC TRACE: Claude PID: ${claudePid}, Terminal: ${terminalId}`);
+
+  executionSessionsWaitingForResponse.set(sessionId, {
+    claudePid,
+    terminalId,
+    startTime: Date.now()
+  });
+
+  console.log(`🎯 EXEC TRACE: [1/5] ✅ Session registered, waiting for Claude to respond...`);
+}
+
+/**
+ * 🎯 Handle first assistant response for execution session
+ */
+function handleFirstExecutionResponse(sessionId, claudeSessionId) {
+  // Find the Holler session that corresponds to this Claude session
+  const hollerSession = sessionManager.getAllSessions()
+    .find(session => session.claudeSessionId === claudeSessionId);
+
+  if (!hollerSession) {
+    return;
+  }
+
+  // Check if this session is waiting for response
+  const waitingData = executionSessionsWaitingForResponse.get(hollerSession.id);
+  if (!waitingData) {
+    console.log(`🎯 EXEC TRACE: [2/5] 🚫 Session ${hollerSession.id} not waiting for response - ignoring`);
+    return;
+  }
+
+  const waitTime = Date.now() - waitingData.startTime;
+  console.log(`🎯 EXEC TRACE: [2/5] ✅ MATCH! Session ${hollerSession.id} got first response after ${waitTime}ms`);
+  console.log(`🎯 EXEC TRACE: [3/5] Starting CPU time monitoring for Claude PID ${waitingData.claudePid}...`);
+
+  // Remove from waiting map
+  executionSessionsWaitingForResponse.delete(hollerSession.id);
+
+  // 🚫 DISABLED: CPU time monitoring replaced with Stop hook detection
+  console.log(`🎯 EXEC TRACE: [3/5] ✅ Using Stop hook for execution completion (old PID monitoring disabled)`);
+  // if (waitingData.claudePid) {
+  //   startCpuTimeMonitoring(hollerSession.id, waitingData.claudePid);
+  // } else {
+  //   console.error(`🎯 EXEC TRACE: [3/5] ❌ CRITICAL: No Claude PID found for session ${hollerSession.id} - cannot monitor!`);
+  // }
+}
+
+/**
+ * 🎯 Handle execution completion (moved from terminal logic)
+ */
+async function handleExecutionCompletion(sessionId) {
+  console.log(`🎯 EXEC TRACE: [5/5] 🏁 Processing execution completion for session ${sessionId}`);
+
+  try {
+    // Find the Holler session by session ID
+    const hollerSession = sessionManager.getSession(sessionId);
+    if (!hollerSession) {
+      console.error(`🎯 EXEC TRACE: [5/5] ❌ Session ${sessionId} not found`);
+      return;
+    }
+
+    console.log(`🎯 EXEC TRACE: [5/5] 🔄 Switching session ${sessionId} back to planning mode`);
+    const updated = sessionManager.db.updateSession(sessionId, {
+      mode: 'planning'
+    });
+
+    if (updated) {
+      console.log(`🎯 EXEC TRACE: [5/5] ✅ Session switched to planning mode`);
+
+      // Build and send planning restart message
+      const planningRestartPrompt = `## Execution Complete - Planning Mode Resumed
+
+Great work! The execution phase has completed and I'm now back in planning mode.
+
+**What would you like to work on next?**
+
+I can help you:
+- 🛠️ Plan new features or improvements
+- 🔧 Analyze and fix issues  
+- 📊 Review and optimize code
+- 🧪 Create tests
+- 📝 Add documentation
+
+Just describe what you'd like to accomplish and I'll create a detailed plan.
+
+**Session ID**: ${sessionId}
+**Mode**: PLANNING (ready for next task)
+
+What's our next mission?`;
+
+      console.log(`📝 EXECUTION COMPLETION: Sending planning restart prompt to terminal ${hollerSession.terminalId}`);
+
+      // Step 1: Write the message (paste it)
+      const promptSuccess = terminalManager.writeToTerminal(hollerSession.terminalId, planningRestartPrompt + '\n');
+
+      if (promptSuccess) {
+        // Step 2: Submit the message after a brief delay
+        setTimeout(() => {
+          console.log(`🚀 EXECUTION COMPLETION: Submitting planning restart prompt to ${hollerSession.terminalId}`);
+          const terminal = terminalManager.getTerminal(hollerSession.terminalId);
+          if (terminal && terminal.ptyProcess) {
+            terminal.ptyProcess.write('\r'); // Send enter through PTY
+            console.log(`🎯 EXECUTION COMPLETION: ✅ Planning restart completed for session ${sessionId}`);
+          } else {
+            console.error(`❌ EXECUTION COMPLETION: Could not find terminal ${hollerSession.terminalId} to submit message`);
+          }
+        }, 1000); // 1 second delay for the paste to settle
+      } else {
+        console.error(`❌ EXECUTION COMPLETION: Failed to send planning prompt to terminal ${hollerSession.terminalId}`);
+      }
+    } else {
+      console.error(`❌ EXECUTION COMPLETION: Failed to update session ${sessionId} mode`);
+    }
+  } catch (error) {
+    console.error(`❌ EXECUTION COMPLETION: Error processing completion for session ${sessionId}:`, error);
+  }
+}
+
 const sessionManager = new SessionManager();
 const correlationManager = new CorrelationManager(sessionManager.db); // Share database instance
 const claudeDiscoveryService = new ClaudeSessionDiscoveryService(sessionManager);
@@ -1143,8 +1373,98 @@ app.prepare().then(() => {
       return;
     }
 
-    // 🚨 REMOVED: Old hook-based status updates (hooks don't work in PTY environment)
-    // Replaced with file-monitor-based status system using session:status-update events
+    // 🎯 NEW: Hook-based execution completion detection  
+    if (parsedUrl.pathname === '/api/session-status-update' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => {
+        body += chunk.toString();
+      });
+
+      req.on('end', async () => {
+        try {
+          console.log(`\n🎯🎯🎯 STOP HOOK API CALLED 🎯🎯🎯`);
+          console.log(`📦 Raw body: ${body}`);
+
+          const { claudeSessionId, status, hookType, timestamp } = JSON.parse(body);
+
+          console.log(`📊 Parsed data:`);
+          console.log(`   claudeSessionId: ${claudeSessionId}`);
+          console.log(`   status: ${status}`);
+          console.log(`   hookType: ${hookType}`);
+          console.log(`   timestamp: ${timestamp}`);
+
+          if (status === 'ready' && hookType === 'Stop') {
+            console.log(`✅ Conditions met: status=ready, hookType=Stop`);
+
+            // Find Holler session by Claude session ID
+            const allSessions = sessionManager.getAllSessions();
+            console.log(`📋 Searching through ${allSessions.length} Holler sessions for claudeSessionId: ${claudeSessionId}`);
+
+            allSessions.forEach((session, index) => {
+              console.log(`   Session ${index + 1}: id=${session.id}, claudeSessionId=${session.claudeSessionId}, mode=${session.mode}, jarvis=${session.jarvisMode}`);
+            });
+
+            const hollerSession = allSessions.find(session => session.claudeSessionId === claudeSessionId);
+
+            if (hollerSession) {
+              console.log(`🎯 FOUND HOLLER SESSION: ${hollerSession.id}`);
+              console.log(`   mode: ${hollerSession.mode}`);
+              console.log(`   jarvisMode: ${hollerSession.jarvisMode}`);
+
+              if (hollerSession.mode === 'execution' && hollerSession.jarvisMode) {
+                console.log(`🏁 EXECUTION COMPLETE: All conditions met, switching to planning mode`);
+
+                // Switch back to planning mode
+                const updated = sessionManager.db.updateSession(hollerSession.id, {
+                  mode: 'planning'
+                });
+
+                console.log(`📝 Database update result: ${updated}`);
+
+                if (updated) {
+                  console.log(`✅ SUCCESS: Session ${hollerSession.id} switched to planning mode`);
+
+                  // Emit status update to frontend
+                  io.emit('session:status-update', {
+                    claudeSessionId,
+                    status: 'ready'
+                  });
+
+                  console.log(`📡 Emitted status update to frontend`);
+
+                  // Trigger planning prompt injection (using existing function)
+                  console.log(`🎯 HOOK COMPLETION: Triggering planning prompt injection`);
+                  await handleJarvisExecutionCompletion(hollerSession, { sessionId: claudeSessionId }, io, terminalManager);
+
+                } else {
+                  console.error(`❌ FAILED: Database update failed for session ${hollerSession.id}`);
+                }
+              } else {
+                console.log(`⚠️ SKIP: Session ${hollerSession.id} not in execution+jarvis mode`);
+                console.log(`   Expected: mode='execution' && jarvisMode=true`);
+                console.log(`   Actual: mode='${hollerSession.mode}' && jarvisMode=${hollerSession.jarvisMode}`);
+              }
+            } else {
+              console.log(`❌ NO MATCH: No Holler session found with claudeSessionId: ${claudeSessionId}`);
+            }
+          } else {
+            console.log(`⚠️ SKIP: Conditions not met`);
+            console.log(`   Expected: status='ready' && hookType='Stop'`);
+            console.log(`   Actual: status='${status}' && hookType='${hookType}'`);
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, claudeSessionId, status }));
+
+        } catch (error) {
+          console.error('❌ Error processing session status update:', error);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid status update data' }));
+        }
+      });
+
+      return;
+    }
 
     // Handle terminal cleanup requests from API routes
     if (parsedUrl.pathname === '/api/sessions/delete' && req.method === 'POST') {
@@ -1828,22 +2148,12 @@ ${rawClonedFileContent}
     });
 
     socket.on('terminal:input', async (sessionId, data) => {
-      // 🔍 MESSAGE SEND DETECTION: Only log when user sends complete message
-      if (data.includes('\r') || data.includes('\n')) {
-        const hollerSession = sessionManager.getSession(sessionId);
-        console.log(`🚀 OUTGOING: User sent message from Holler session ${sessionId}`);
-        console.log(`📋 OUTGOING: Session name: ${hollerSession?.name || 'Unknown'}`);
-        console.log(`🔗 OUTGOING: Linked Claude session: ${hollerSession?.claudeSessionId || 'None'}`);
-      }
 
       // Check if this is a session that needs Claude session linking
-      const hollerSession = sessionManager.getSession(sessionId);
-      const isFirstMessage = hollerSession && !hollerSession.claudeSessionId;
+      // Note: sessionId here is actually the terminalId, need to find by terminalId
+      const hollerSession = sessionManager.getAllSessions()
+        .find(session => session.terminalId === sessionId);
 
-      if (isFirstMessage) {
-        console.log(`🔗 First message detected for unlinked session: ${sessionId}`);
-        console.log(`🔗 Will auto-correlate after message is processed`);
-      }
 
       // EXACT node-pty example pattern: input to PTY
       const success = terminalManager.writeToTerminal(sessionId, data);
@@ -1852,7 +2162,8 @@ ${rawClonedFileContent}
         return;
       }
 
-      // 🎯 SIMPLE SESSION TRACKING: Will be triggered by file monitor instead
+      // 🎯 EXECUTION MONITORING: Terminal activity no longer triggers monitoring
+      // Network monitoring is now triggered by first assistant response (see assistantFirstResponse event)
 
     });
 
@@ -1929,6 +2240,32 @@ ${rawClonedFileContent}
       });
     });
 
+    // 🎯 EXECUTION MONITORING: Register session as waiting for first assistant response
+    socket.on('execution:register-waiting', (data) => {
+      const { sessionId, claudePid, terminalId } = data;
+
+
+      // Validate required data
+      if (!sessionId || !claudePid || !terminalId) {
+        console.error(`❌ SOCKET: Missing required data for execution registration`);
+        socket.emit('execution:register-waiting:response', {
+          success: false,
+          error: 'Missing required fields: sessionId, claudePid, terminalId'
+        });
+        return;
+      }
+
+      // Register the session
+      registerExecutionSessionWaitingForResponse(sessionId, claudePid, terminalId);
+
+      // Respond with success
+      socket.emit('execution:register-waiting:response', {
+        success: true,
+        sessionId,
+        claudePid,
+        message: `Session ${sessionId} registered and waiting for first assistant response`
+      });
+    });
 
     // SESSION MANAGEMENT ENDPOINTS
     socket.on('session:list', () => {

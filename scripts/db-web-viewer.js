@@ -78,37 +78,40 @@ function createWebViewer() {
           </div>
         `;
         
-        // Sessions table
+        // Sessions table - Get column info dynamically
+        const sessionTableInfo = db.prepare("PRAGMA table_info(sessions)").all();
         const sessions = db.prepare('SELECT * FROM sessions ORDER BY created DESC').all();
+        
         html += `
           <div class="section">
-            <h2>📋 Sessions</h2>
+            <h2>📋 Sessions (All Columns)</h2>
             <table>
               <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Created</th>
-                <th>Claude ID</th>
-                <th>Jarvis Mode</th>
-                <th>Mode</th>
-                <th>Last UUID</th>
-                <th>Plan</th>
+                ${sessionTableInfo.map(col => `<th>${col.name.replace(/_/g, ' ').toUpperCase()}</th>`).join('')}
               </tr>
         `;
         
         sessions.forEach(session => {
-          html += `
-            <tr>
-              <td>${session.id}</td>
-              <td>${session.name}</td>
-              <td>${new Date(session.created).toLocaleString()}</td>
-              <td>${session.claude_session_id || '(none)'}</td>
-              <td>${session.jarvis_mode ? 'YES' : 'NO'}</td>
-              <td>${session.mode || '(none)'}</td>
-              <td>${session.last_uuid || '(none)'}</td>
-              <td>${session.plan ? session.plan.substring(0, 50) + '...' : '(none)'}</td>
-            </tr>
-          `;
+          html += `<tr>`;
+          sessionTableInfo.forEach(col => {
+            const value = session[col.name];
+            let displayValue;
+            
+            if (value === null || value === undefined) {
+              displayValue = '(none)';
+            } else if (col.name === 'created') {
+              displayValue = new Date(value).toLocaleString();
+            } else if (col.name === 'plan' && value && value.length > 50) {
+              displayValue = value.substring(0, 50) + '...';
+            } else if (col.name === 'jarvis_mode') {
+              displayValue = value ? 'YES' : 'NO';
+            } else {
+              displayValue = value;
+            }
+            
+            html += `<td>${displayValue}</td>`;
+          });
+          html += `</tr>`;
         });
         
         html += '</table></div>';

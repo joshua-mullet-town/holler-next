@@ -39,15 +39,15 @@ const HollerSessionManager: React.FC = () => {
   const [socket, setSocket] = useState<any>(null);
   const [ttsManager, setTtsManager] = useState<any>(null);
   const ttsManagerRef = useRef<any>(null);
-  
+
   // Kokoro TTS POC state
   const [kokoroPOC, setKokoroPOC] = useState<KokoroTTSProof | null>(null);
   const [kokoroLoading, setKokoroLoading] = useState(false);
   const [kokoroStatus, setKokoroStatus] = useState('');
-  
+
   // Supercharged TTS state
   const [superchargedTTS, setSuperchargedTTS] = useState<SuperchargedTTSManager | null>(null);
-  
+
   const [showBrowsePromoteModal, setShowBrowsePromoteModal] = useState(false);
   const [showCreateNewInput, setShowCreateNewInput] = useState(false);
   const [newSessionName, setNewSessionName] = useState('');
@@ -149,7 +149,7 @@ const HollerSessionManager: React.FC = () => {
         console.error('❌ KOKORO POC: Failed to create instance:', error);
       }
     };
-    
+
     initKokoroPOC();
   }, []);
 
@@ -165,7 +165,7 @@ const HollerSessionManager: React.FC = () => {
         console.error('❌ SUPERCHARGED TTS: Failed to create instance:', error);
       }
     };
-    
+
     initSuperchargedTTS();
   }, []);
 
@@ -187,7 +187,7 @@ const HollerSessionManager: React.FC = () => {
         const initTTS = async () => {
           try {
             console.log('🔊 TTS: Starting initialization...');
-            
+
             // Try to import the TTS manager class
             let TTSQueueManager;
             try {
@@ -201,11 +201,11 @@ const HollerSessionManager: React.FC = () => {
               TTSQueueManager = module.default;
               console.log('🔊 TTS: Alternative import successful');
             }
-            
+
             if (!TTSQueueManager) {
               throw new Error('TTSQueueManager class not found in module');
             }
-            
+
             console.log('🔊 TTS: Creating TTS instance...');
             const ttsInstance = new TTSQueueManager();
             console.log('🔊 TTS: TTS instance created:', !!ttsInstance);
@@ -217,51 +217,51 @@ const HollerSessionManager: React.FC = () => {
             console.log('🔊 TTS: Ref is set:', !!ttsManagerRef.current);
           } catch (error) {
             console.error('❌ TTS: Failed to initialize:', error);
-            
+
             // Create a robust fallback TTS manager
             console.log('🔊 TTS: Creating enhanced fallback TTS manager');
             const fallbackTTS = {
               isEnabled: false,
               isSupported: 'speechSynthesis' in window,
-              enable: function() {
+              enable: function () {
                 this.isEnabled = true;
                 console.log('🔊 TTS FALLBACK: Enabled');
                 return true;
               },
-              disable: function() {
+              disable: function () {
                 this.isEnabled = false;
                 console.log('🔊 TTS FALLBACK: Disabled');
               },
-              addMessage: function(text: string, options = {}) {
+              addMessage: function (text: string, options = {}) {
                 console.log(`🔊 TTS FALLBACK: Processing message (${text.length} chars)`);
-                
+
                 if (!this.isSupported) {
                   console.log('🔇 TTS FALLBACK: Speech synthesis not supported');
                   return;
                 }
-                
+
                 if (!this.isEnabled) {
                   console.log('🔇 TTS FALLBACK: TTS not enabled, auto-enabling...');
                   this.enable();
                 }
-                
+
                 console.log(`🔊 TTS FALLBACK: Speaking: "${text.substring(0, 100)}..."`);
                 try {
                   const utterance = new SpeechSynthesisUtterance(text);
                   utterance.rate = 1.0;
                   utterance.volume = 1.0;
                   utterance.pitch = 1.0;
-                  
+
                   utterance.onstart = () => console.log('🔊 TTS FALLBACK: Speech started');
                   utterance.onend = () => console.log('🔊 TTS FALLBACK: Speech finished');
                   utterance.onerror = (e) => console.error('❌ TTS FALLBACK: Speech error:', e);
-                  
+
                   window.speechSynthesis.speak(utterance);
                 } catch (e) {
                   console.error('❌ TTS FALLBACK: Failed to speak:', e);
                 }
               },
-              getStatus: function() {
+              getStatus: function () {
                 return {
                   isSupported: this.isSupported,
                   isEnabled: this.isEnabled,
@@ -269,7 +269,7 @@ const HollerSessionManager: React.FC = () => {
                 };
               }
             };
-            
+
             setTtsManager(fallbackTTS);
             console.log('🔊 TTS: Fallback TTS manager created and initialized');
           }
@@ -311,7 +311,7 @@ const HollerSessionManager: React.FC = () => {
             ...session,
             status: session.claudeSessionId ? 'ready' : undefined // Green if linked, gray if not
           }));
-          
+
           setSessions(sessionsWithStatus);
 
           if (sessionsWithStatus.length > 0) {
@@ -375,7 +375,7 @@ const HollerSessionManager: React.FC = () => {
           timestamp: string
         }) => {
           console.log(`🔄 Real-time Sync: Session ${sessionUpdate.sessionId} → Claude ${sessionUpdate.claudeSessionId}`);
-          
+
           // Update session with new Claude session ID
           setSessions(prev => prev.map(session =>
             session.id === sessionUpdate.sessionId
@@ -420,35 +420,62 @@ const HollerSessionManager: React.FC = () => {
           timestamp: string,
           messageLength: number
         }) => {
-          console.log(`🔊 TTS: Message for session ${data.sessionId} (${data.messageLength} chars)`);
-          
+          console.log(`🎯 TTS DEBUG: ========== FRONTEND TTS EVENT RECEIVED ==========`);
+          console.log(`🎯 TTS DEBUG: Event payload:`, data);
+          console.log(`🎯 TTS DEBUG: Message preview: "${data.text.substring(0, 150)}..."`);
+
           // Get current TTS manager - prioritize ref for immediate availability
           const activeTtsManager = ttsManagerRef.current;
-          
+          const backupTtsManager = ttsManager;
+
+          console.log(`🔍 TTS DEBUG: TTS Manager state:`, {
+            refManager: !!activeTtsManager,
+            stateManager: !!backupTtsManager,
+            refEnabled: activeTtsManager?.isEnabled,
+            stateEnabled: backupTtsManager?.isEnabled
+          });
+
           if (!activeTtsManager) {
-            console.log('🔇 TTS: Manager not initialized');
-            return;
+            console.log('❌ TTS DEBUG: No TTS manager available (ref is null)');
+            if (!backupTtsManager) {
+              console.log('❌ TTS DEBUG: Backup TTS manager also null - TTS completely unavailable');
+              return;
+            } else {
+              console.log('🔄 TTS DEBUG: Using backup TTS manager from state');
+            }
           }
-          
+
+          const finalTtsManager = activeTtsManager || backupTtsManager;
+
           // Access current sessions through state callback
           setSessions(currentSessions => {
             const session = currentSessions.find(s => s.id === data.sessionId);
-            
+
             if (session?.jarvisMode) {
-              console.log(`🔊 TTS: Speaking for Jarvis session`);
-              
+
               // Enable TTS on first use (required for browser autoplay policies)
-              if (!activeTtsManager.isEnabled) {
-                console.log('🔊 TTS: Auto-enabling');
-                activeTtsManager.enable();
+              if (!finalTtsManager.isEnabled) {
+                console.log('🔧 TTS DEBUG: TTS not enabled, attempting to enable...');
+                const enableResult = finalTtsManager.enable();
+                console.log(`🔧 TTS DEBUG: Enable result: ${enableResult}`);
+              } else {
+                console.log('✅ TTS DEBUG: TTS already enabled');
               }
-              
+
               // Add message to TTS queue
-              activeTtsManager.addMessage(data.text, { sessionId: data.sessionId });
+              console.log(`🚀 TTS DEBUG: Adding message to TTS queue...`);
+              try {
+                finalTtsManager.addMessage(data.text, { sessionId: data.sessionId });
+                console.log(`✅ TTS DEBUG: Successfully added message to TTS queue`);
+              } catch (error) {
+                console.error(`❌ TTS DEBUG: Error adding message to queue:`, error);
+              }
             } else {
-              console.log(`🔇 TTS: Session not in Jarvis mode`);
+              console.log(`❌ TTS DEBUG: Session not in Jarvis mode or session not found`);
             }
-            
+
+            console.log(`🎯 TTS DEBUG: ========== END FRONTEND TTS EVENT ==========`);
+
             // Return unchanged sessions (we're just using this to access current state)
             return currentSessions;
           });
@@ -484,7 +511,7 @@ const HollerSessionManager: React.FC = () => {
       const timer = setTimeout(() => {
         setRecentlyDeleted(null);
       }, 10000); // 10 seconds to undo
-      
+
       return () => clearTimeout(timer);
     }
   }, [recentlyDeleted]);
@@ -633,7 +660,7 @@ const HollerSessionManager: React.FC = () => {
     if (!socket || !message.trim()) return;
 
     console.log(`🎤 Audio: Sending message to session ${sessionId}: "${message}"`);
-    
+
     socket.emit('session:send-message', {
       sessionId: sessionId,
       message: message
@@ -865,7 +892,7 @@ const HollerSessionManager: React.FC = () => {
       if (socket) {
         console.log(`📡 TRUE UNDO: Sending recreate signal to backend`);
         socket.emit('session:create', sessionToRestore);
-        
+
         // Also restore terminal connection
         setTimeout(() => {
           createTerminalForSession(sessionToRestore, socket, true);
@@ -909,17 +936,17 @@ const HollerSessionManager: React.FC = () => {
           <motion.button
             onClick={async () => {
               if (!socket || !activeSessionId) return;
-              
+
               console.log('🤖 AI Test: Sending programmatic message to Claude CLI');
-              
+
               try {
                 const testMessage = "🤖 This message was sent programmatically via button click - testing AI auto-response integration!";
-                
+
                 socket.emit('session:send-message', {
                   sessionId: activeSessionId,
                   message: testMessage
                 });
-                
+
                 console.log('✅ AI Test: Message injected into Claude CLI session');
               } catch (error) {
                 console.error('❌ AI Test: Failed to send message:', error);
@@ -939,14 +966,14 @@ const HollerSessionManager: React.FC = () => {
           <motion.button
             onClick={async () => {
               console.log('🔊 TTS Test: Testing text-to-speech functionality');
-              
+
               try {
                 if (!ttsManager) {
                   console.error('❌ TTS Test: TTS manager not initialized');
                   alert('TTS manager not initialized. Check console for errors.');
                   return;
                 }
-                
+
                 // Enable TTS if not already enabled
                 if (!ttsManager.isEnabled) {
                   console.log('🔊 TTS Test: Enabling TTS manager');
@@ -957,13 +984,13 @@ const HollerSessionManager: React.FC = () => {
                     return;
                   }
                 }
-                
+
                 // Test message
                 const testText = "Hello! This is a test of the text-to-speech system. If you can hear this, the TTS queue is working correctly.";
-                
+
                 console.log('🔊 TTS Test: Adding test message to queue');
                 ttsManager.addMessage(testText, { sessionId: 'test' });
-                
+
                 console.log('✅ TTS Test: Test message queued successfully');
               } catch (error) {
                 console.error('❌ TTS Test: Failed:', error);
@@ -983,7 +1010,7 @@ const HollerSessionManager: React.FC = () => {
           <motion.button
             onClick={async () => {
               console.log('🤖 KOKORO POC: Testing Kokoro AI voice');
-              
+
               if (!kokoroPOC) {
                 alert('Kokoro POC not initialized. Check console for errors.');
                 return;
@@ -995,23 +1022,23 @@ const HollerSessionManager: React.FC = () => {
               try {
                 // Test message comparing to Web Speech API
                 const testText = "Hello! This is the new Kokoro AI voice. Notice how much more natural and human-like this sounds compared to the robotic Web Speech API. This is the future of text-to-speech!";
-                
+
                 console.log('🤖 KOKORO POC: Starting voice test');
                 setKokoroStatus('Generating speech...');
-                
+
                 await kokoroPOC.speak(testText);
-                
+
                 setKokoroStatus('✅ Voice test completed!');
                 console.log('✅ KOKORO POC: Voice test completed successfully');
-                
+
                 // Clear status after 3 seconds
                 setTimeout(() => setKokoroStatus(''), 3000);
-                
+
               } catch (error) {
                 console.error('❌ KOKORO POC: Voice test failed:', error);
                 setKokoroStatus('❌ Voice test failed');
                 alert(`Kokoro AI Test failed: ${error.message}`);
-                
+
                 // Clear error status after 5 seconds
                 setTimeout(() => setKokoroStatus(''), 5000);
               } finally {
@@ -1019,11 +1046,10 @@ const HollerSessionManager: React.FC = () => {
               }
             }}
             disabled={kokoroLoading}
-            className={`w-full flex items-center justify-center space-x-2 ${
-              kokoroLoading 
-                ? 'bg-orange-500/40 cursor-not-allowed' 
+            className={`w-full flex items-center justify-center space-x-2 ${kokoroLoading
+                ? 'bg-orange-500/40 cursor-not-allowed'
                 : 'bg-orange-500/20 hover:bg-orange-500/30'
-            } text-white p-3 rounded-xl transition-all`}
+              } text-white p-3 rounded-xl transition-all`}
             whileHover={kokoroLoading ? {} : { scale: 1.02 }}
             whileTap={kokoroLoading ? {} : { scale: 0.98 }}
           >
@@ -1043,7 +1069,7 @@ const HollerSessionManager: React.FC = () => {
           <motion.button
             onClick={async () => {
               console.log('⚡ SUPERCHARGED TTS: Testing optimized Web Speech API');
-              
+
               if (!superchargedTTS) {
                 alert('Supercharged TTS not initialized. Check console for errors.');
                 return;
@@ -1055,15 +1081,15 @@ const HollerSessionManager: React.FC = () => {
                   console.log('⚡ SUPERCHARGED TTS: Enabling...');
                   superchargedTTS.enable();
                 }
-                
+
                 // Test message comparing to basic Web Speech API
                 const testText = "Hello! This is the supercharged Web Speech API with research-based optimizations. I automatically selected the best available voice and optimized the speech parameters for maximum naturalness and clarity. Notice the improved quality compared to the basic version!";
-                
+
                 console.log('⚡ SUPERCHARGED TTS: Speaking with optimized settings');
                 await superchargedTTS.addMessage(testText, { sessionId: 'supercharged-test' });
-                
+
                 console.log('✅ SUPERCHARGED TTS: Voice test completed successfully');
-                
+
               } catch (error) {
                 console.error('❌ SUPERCHARGED TTS: Voice test failed:', error);
                 alert(`Supercharged TTS Test failed: ${error.message}`);
@@ -1099,7 +1125,7 @@ const HollerSessionManager: React.FC = () => {
                 className="w-full bg-white/20 text-white placeholder-white/50 border border-white/30 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-orange-500"
                 autoFocus
               />
-              
+
               <div className="space-y-2">
                 <input
                   type="text"
@@ -1113,18 +1139,17 @@ const HollerSessionManager: React.FC = () => {
                     <button
                       key={dir}
                       onClick={() => setNewSessionProjectPath(dir)}
-                      className={`px-2 py-1 text-xs rounded transition-colors ${
-                        newSessionProjectPath === dir 
-                          ? 'bg-orange-500/30 text-orange-200' 
+                      className={`px-2 py-1 text-xs rounded transition-colors ${newSessionProjectPath === dir
+                          ? 'bg-orange-500/30 text-orange-200'
                           : 'bg-white/20 text-white/70 hover:bg-white/30'
-                      }`}
+                        }`}
                     >
                       {dir.split('/').pop()}
                     </button>
                   ))}
                 </div>
               </div>
-              
+
               <div className="text-xs text-white/60">Press Enter to create, Esc to cancel</div>
             </div>
           ) : (
@@ -1162,8 +1187,8 @@ const HollerSessionManager: React.FC = () => {
                   <motion.div
                     onClick={() => switchToSession(session.id)}
                     className={`w-full text-left p-3 rounded-xl transition-all cursor-pointer relative ${session.id === activeSessionId
-                        ? 'bg-white/30 text-white'
-                        : 'bg-white/10 text-white/80 hover:bg-white/20'
+                      ? 'bg-white/30 text-white'
+                      : 'bg-white/10 text-white/80 hover:bg-white/20'
                       }`}
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -1224,11 +1249,10 @@ const HollerSessionManager: React.FC = () => {
                                 <div className="relative">
                                   <MessageCircle size={16} />
                                   {/* Status dot overlay */}
-                                  <div className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border border-slate-800 ${
-                                    !session.claudeSessionId ? 'bg-gray-400' :        // No Claude session linked
-                                    session.status === 'loading' ? 'bg-yellow-400 animate-pulse' :  // Claude thinking
-                                    'bg-green-400'  // Claude ready for user input
-                                  }`} />
+                                  <div className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border border-slate-800 ${!session.claudeSessionId ? 'bg-gray-400' :        // No Claude session linked
+                                      session.status === 'loading' ? 'bg-yellow-400 animate-pulse' :  // Claude thinking
+                                        'bg-green-400'  // Claude ready for user input
+                                    }`} />
                                 </div>
                                 <div className="flex-1">
                                   <span className="font-medium text-sm truncate group-hover/name:border-b border-white/40 transition-all duration-200 block">
@@ -1277,27 +1301,26 @@ const HollerSessionManager: React.FC = () => {
                                   onClick={async (e) => {
                                     e.stopPropagation();
                                     if (!socket) return;
-                                    
+
                                     const newJarvisMode = !session.jarvisMode;
-                                    
+
                                     console.log(`🔄 Toggling Jarvis mode: ${newJarvisMode ? 'ON' : 'OFF'} for session ${session.id}`);
-                                    
+
                                     try {
                                       socket.emit('session:toggle-jarvis', {
                                         sessionId: session.id,
                                         jarvisMode: newJarvisMode
                                       });
-                                      
+
                                       console.log(`✅ Jarvis mode ${newJarvisMode ? 'ENABLED' : 'DISABLED'} for session: ${session.id}`);
                                     } catch (error) {
                                       console.error('❌ Failed to toggle Jarvis mode:', error);
                                     }
                                   }}
-                                  className={`relative w-8 h-4 rounded-full transition-all ml-2 ${
-                                    session.jarvisMode 
-                                      ? 'bg-blue-500 shadow-blue-500/50 shadow-lg' 
+                                  className={`relative w-8 h-4 rounded-full transition-all ml-2 ${session.jarvisMode
+                                      ? 'bg-blue-500 shadow-blue-500/50 shadow-lg'
                                       : 'bg-gray-600'
-                                  }`}
+                                    }`}
                                   whileTap={{ scale: 0.95 }}
                                 >
                                   <motion.div
@@ -1412,7 +1435,7 @@ const HollerSessionManager: React.FC = () => {
                 </div>
               </div>
             </div>
-            
+
             {/* Plan Content */}
             <div className="flex-1 p-4 overflow-y-auto">
               {activeSession.plan ? (
@@ -1425,7 +1448,7 @@ const HollerSessionManager: React.FC = () => {
                 </div>
               )}
             </div>
-            
+
             {/* Jarvis Status Footer */}
             <div className="p-3 border-t border-purple-500/30 bg-purple-900/10">
               <div className="text-xs text-purple-200 flex items-center justify-between">
@@ -1438,14 +1461,13 @@ const HollerSessionManager: React.FC = () => {
       })()}
 
       {/* Terminal Area */}
-      <div className={`flex-1 relative max-w-4xl transition-all duration-300 ${
-        (() => {
+      <div className={`flex-1 relative max-w-4xl transition-all duration-300 ${(() => {
           const activeSession = sessions.find(s => s.id === activeSessionId);
-          return activeSession?.jarvisMode 
-            ? 'border-2 border-purple-500/50 rounded-lg shadow-lg shadow-purple-500/20' 
+          return activeSession?.jarvisMode
+            ? 'border-2 border-purple-500/50 rounded-lg shadow-lg shadow-purple-500/20'
             : '';
         })()
-      }`}>
+        }`}>
         {sessions.length === 0 && (
           <div className="flex items-center justify-center h-full text-white/60">
             <div className="text-center">
@@ -1481,7 +1503,7 @@ const HollerSessionManager: React.FC = () => {
       />
 
       {/* Floating Audio Button - Positioned absolutely to escape flex container */}
-      <FloatingWorkbench 
+      <FloatingWorkbench
         activeSessionId={activeSessionId}
         onSendMessage={handleSendMessage}
       />

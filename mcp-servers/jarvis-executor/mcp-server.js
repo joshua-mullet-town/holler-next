@@ -34,7 +34,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: 'execute_jarvis_plan',
-        description: 'Execute the current Jarvis plan in implementation mode. Use this when the user wants to start executing their plan, such as when they say phrases like "go to pound town claude code", "execute the plan", "run the plan", "start execution", "implement this", or similar execution commands.',
+        description: 'Execute the current Jarvis plan in implementation mode. Use this ONLY when the user says the exact phrase "go to pound town claude code" or very similar variations of that specific phrase.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -12,6 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const io = require('socket.io-client');
+const { exec } = require('child_process');
 const SessionManager = require('../lib/SessionManager');
 
 const HOLLER_SERVER_URL = 'http://localhost:3002';
@@ -53,11 +54,57 @@ async function executeJarvisPlan() {
         console.log(`🎯 Found active Jarvis session: ${activeSession.name}`);
         console.log(`📋 Plan length: ${plan.length} characters`);
         
-        // 2. Update mode to execution and clear session correlation for fresh start
+        // 2. Get current Claude Code PID (find most recently started)
+        console.log(`🔍 Capturing current Claude Code PID...`);
+        const claudePid = await new Promise((resolve) => {
+            exec('pgrep -f "claude.*holler-next"', (error, stdout) => {
+                if (error) {
+                    console.log(`📊 Claude Code PID: not found`);
+                    resolve(null);
+                    return;
+                }
+                
+                const pids = stdout.trim().split('\n').filter(pid => pid.trim());
+                if (pids.length === 0) {
+                    resolve(null);
+                    return;
+                }
+                
+                console.log(`📊 Claude Code PIDs found: ${pids.join(', ')}`);
+                
+                if (pids.length === 1) {
+                    console.log(`📊 Using single PID: ${pids[0]}`);
+                    resolve(pids[0]);
+                    return;
+                }
+                
+                // Multiple PIDs - find the most recently started one
+                exec(`ps -p ${pids.join(',')} -o pid,lstart --no-headers | sort -k2`, (psError, psStdout) => {
+                    if (psError) {
+                        console.log(`📊 Fallback: Using first PID: ${pids[0]}`);
+                        resolve(pids[0]);
+                        return;
+                    }
+                    
+                    const psLines = psStdout.trim().split('\n');
+                    const newestPid = psLines[psLines.length - 1].trim().split(/\s+/)[0];
+                    console.log(`📊 Multiple PIDs found, using newest: ${newestPid}`);
+                    console.log(`📊 PID start times:`);
+                    psLines.forEach(line => console.log(`📊   ${line.trim()}`));
+                    resolve(newestPid);
+                });
+            });
+        });
+        
+        // 3. Update mode to execution and clear session correlation for fresh start
         const updated = sessionManager.db.updateSession(activeSessionId, {
             mode: 'execution',
             claudeSessionId: null,
-            lastUuid: null
+            lastUuid: null,
+            claudePid: claudePid,
+            lastCpuTime: 0,
+            lastCpuTimeCheck: 0,
+            lastCpuTimeGrowth: 0
         });
         if (!updated) {
             console.log('❌ Failed to update session mode to execution');
@@ -65,6 +112,8 @@ async function executeJarvisPlan() {
         }
         console.log('✅ Updated session mode to execution');
         console.log('✅ Cleared claudeSessionId and lastUuid for fresh session correlation');
+        console.log('✅ Reset CPU time tracking for fresh execution monitoring');
+        console.log(`✅ Stored Claude Code PID: ${claudePid || 'none'} for execution monitoring`);
         
         // 3. Build execution prompt
         const executionPrompt = `/clear
@@ -125,25 +174,33 @@ ${plan}
                 console.log('✅ Connected to Holler server');
                 clearTimeout(timeout);
                 
-                // Schedule clear command for 10 seconds from now
-                console.log('📅 Scheduling /clear command for 10 seconds...');
+                // Schedule clear command for 8 seconds from now (optimized timing)
+                console.log('📅 Scheduling /clear command for 8 seconds...');
                 socket.emit('schedule:execution', {
                     terminalId: activeSession.terminalId,
-                    delaySeconds: 10,
+                    delaySeconds: 8,
                     command: '/clear'
                 });
                 
-                // Schedule execution prompt for 15 seconds from now (10 + 5)
-                console.log('📅 Scheduling execution prompt for 15 seconds...');
+                // Schedule execution prompt for 11 seconds from now (8 + 3)
+                console.log('📅 Scheduling execution prompt for 11 seconds...');
                 socket.emit('schedule:execution', {
                     terminalId: activeSession.terminalId, 
-                    delaySeconds: 15,
+                    delaySeconds: 11,
                     command: executionPrompt
+                });
+                
+                // 🎯 EXECUTION MONITORING: Register session as waiting for first assistant response
+                console.log('📝 Registering session as waiting for first assistant response...');
+                socket.emit('execution:register-waiting', {
+                    sessionId: activeSession.id,
+                    claudePid: claudePid,
+                    terminalId: activeSession.terminalId
                 });
                 
                 // Wait briefly for scheduling confirmations, then disconnect
                 setTimeout(() => {
-                    console.log('✅ Both commands scheduled - disconnecting immediately');
+                    console.log('✅ Execution commands scheduled - disconnecting immediately');
                     socket.disconnect();
                     resolve({
                         success: true,
@@ -152,7 +209,7 @@ ${plan}
                         terminalId: activeSession.terminalId,
                         clearScheduled: true,
                         executionScheduled: true,
-                        message: "Non-blocking job queue approach - commands scheduled for execution"
+                        message: "Execution scheduled - timeout detection will handle restart"
                     });
                 }, 1000); // Just wait 1 second for confirmations
             });
@@ -177,9 +234,9 @@ if (require.main === module) {
             console.log('🎯 JARVIS SCHEDULING COMPLETE!');
             console.log(`✅ Session ${result.sessionName} switched to execution mode`);
             console.log(`📅 Commands scheduled for terminal ${result.terminalId}`);
-            console.log('⏰ Clear command will execute in 10 seconds');
-            console.log('⏰ Execution prompt will run in 15 seconds');
-            console.log('🚀 Script finished - backend will handle execution!');
+            console.log('⏰ Clear command will execute in 8 seconds');
+            console.log('⏰ Execution prompt will run in 11 seconds');
+            console.log('🚀 Script finished - timeout detection will handle restart!');
         } else {
             console.log('❌ Failed:', result.error);
             process.exit(1);
