@@ -1067,21 +1067,7 @@ class ClaudeSessionDiscoveryService {
   }
 }
 
-/**
- * 🔍 Check network activity for a Claude PID
- * Returns CPU% and connection count to determine if Claude is active
- */
-/**
- * Parse time string (MM:SS.ss or HH:MM:SS) to seconds
- */
-// 🗑️ REMOVED parseTimeToSeconds - no longer needed
-
-    terminalId,
-    startTime: Date.now()
-  });
-
-  console.log(`🎯 EXEC TRACE: [1/5] ✅ Session registered, waiting for Claude to respond...`);
-}
+// 🗑️ REMOVED: Old network activity and execution monitoring functions
 
 /**
  * 🎯 Handle first assistant response for execution session
