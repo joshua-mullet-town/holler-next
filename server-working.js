@@ -20,11 +20,7 @@ const port = process.env.PORT || 3002;
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-// 🎯 EXECUTION COMPLETION DETECTION: CPU time monitoring per Claude PID
-const executionCompletionTimers = new Map(); // sessionId -> timerId (legacy fallback)
-const networkActivityMonitors = new Map(); // claudePid -> intervalId
-const executionSessionsWaitingForResponse = new Map(); // sessionId -> { claudePid, startTime, terminalId }
-const consecutiveIdleChecks = new Map(); // sessionId -> count of consecutive idle checks
+// 🎯 EXECUTION COMPLETION DETECTION: Now handled by Stop hook integration
 
 // PROVEN PATTERN: Direct PTY management like node-pty example
 class WorkingTerminalManager {
@@ -1078,128 +1074,8 @@ class ClaudeSessionDiscoveryService {
 /**
  * Parse time string (MM:SS.ss or HH:MM:SS) to seconds
  */
-function parseTimeToSeconds(timeStr) {
-  const parts = timeStr.split(':');
-  if (parts.length === 2) {
-    // MM:SS.ss format
-    return parseInt(parts[0]) * 60 + parseFloat(parts[1]);
-  } else if (parts.length === 3) {
-    // HH:MM:SS format  
-    return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
-  }
-  return 0;
-}
+// 🗑️ REMOVED parseTimeToSeconds - no longer needed
 
-/**
- * Check Claude CPU time for execution completion detection
- */
-async function checkClaudeCpuTime(claudePid, sessionId, sessionManager) {
-  return new Promise((resolve) => {
-    const { exec } = require('child_process');
-
-    exec(`ps -p ${claudePid} -o time=`, (error, stdout) => {
-      if (error) {
-        resolve({ active: false, cpuTime: null, reason: 'process_not_found' });
-        return;
-      }
-
-      // Parse CPU time (format: MM:SS.ss or HH:MM:SS)
-      const timeStr = stdout.trim();
-      const cpuTimeSeconds = parseTimeToSeconds(timeStr);
-
-      // Get previous reading from database
-      const session = sessionManager.getSession(sessionId);
-      const lastCpuTime = session.lastCpuTime || 0;
-      const lastCheck = session.lastCpuTimeCheck || Date.now();
-
-      // Calculate growth since last check
-      const growth = cpuTimeSeconds - lastCpuTime;
-      const timeSinceCheck = (Date.now() - lastCheck) / 1000;
-
-      // DEBUG: Log the calculation
-      console.log(`🎯 CPU TIME DEBUG: PID ${claudePid} - Raw: "${timeStr}" → ${cpuTimeSeconds}s, Last: ${lastCpuTime}s, Growth: ${growth}s`);
-
-      // Update database with current reading
-      sessionManager.db.updateSession(sessionId, {
-        lastCpuTime: cpuTimeSeconds,
-        lastCpuTimeCheck: Date.now(),
-        lastCpuTimeGrowth: growth
-      });
-
-      // Consider idle if growth <= 0.02 seconds in a 5+ second period
-      const isActive = growth > 0.02;
-
-      resolve({
-        active: isActive,
-        cpuTime: cpuTimeSeconds,
-        growth,
-        timeSinceCheck,
-        reason: isActive ? 'cpu_time_growing' : 'cpu_time_stable'
-      });
-    });
-  });
-}
-
-/**
- * 🎯 Start CPU time monitoring for execution completion detection
- */
-function startCpuTimeMonitoring(sessionId, claudePid) {
-  console.log(`🎯 EXEC TRACE: [3/5] ✅ Starting CPU time monitoring - PID ${claudePid}, Session ${sessionId}`);
-
-  // Clear any existing monitor for this PID
-  if (networkActivityMonitors.has(claudePid)) {
-    clearInterval(networkActivityMonitors.get(claudePid));
-    console.log(`🎯 EXEC TRACE: [3/5] Cleared existing monitor for PID ${claudePid}`);
-  }
-
-  // Initialize consecutive idle counter
-  consecutiveIdleChecks.set(sessionId, 0);
-
-  // Check every 5 seconds for CPU time growth
-  const intervalId = setInterval(async () => {
-    const activity = await checkClaudeCpuTime(claudePid, sessionId, sessionManager);
-    console.log(`🎯 EXEC TRACE: [4/5] PID ${claudePid} - CPU time: ${activity.cpuTime}s, Growth: ${activity.growth}s, Active: ${activity.active}`);
-
-    if (!activity.active) {
-      // Increment consecutive idle checks
-      const currentIdle = consecutiveIdleChecks.get(sessionId) || 0;
-      const newIdle = currentIdle + 1;
-      consecutiveIdleChecks.set(sessionId, newIdle);
-
-      console.log(`🎯 EXEC TRACE: [4/5] ⏰ PID ${claudePid} idle check ${newIdle}/3 - need 3 consecutive for completion`);
-
-      // Require 3 consecutive idle checks (15 seconds sustained inactivity)
-      if (newIdle >= 3) {
-        console.log(`🎯 EXEC TRACE: [4/5] 🏁 PID ${claudePid} sustained inactivity for 15s - triggering completion!`);
-
-        // Stop monitoring this PID
-        clearInterval(intervalId);
-        networkActivityMonitors.delete(claudePid);
-        consecutiveIdleChecks.delete(sessionId);
-
-        // Trigger execution completion
-        await handleExecutionCompletion(sessionId);
-      }
-    } else {
-      // Reset idle counter when activity detected
-      consecutiveIdleChecks.set(sessionId, 0);
-      console.log(`🎯 EXEC TRACE: [4/5] 🔥 PID ${claudePid} activity detected - reset idle counter`);
-    }
-  }, 5000); // Check every 5 seconds
-
-  networkActivityMonitors.set(claudePid, intervalId);
-  console.log(`🎯 EXEC TRACE: [3/5] ✅ CPU time monitoring started - checking every 5 seconds`);
-}
-
-/**
- * 🎯 Register session as waiting for first assistant response
- */
-function registerExecutionSessionWaitingForResponse(sessionId, claudePid, terminalId) {
-  console.log(`🎯 EXEC TRACE: [1/5] Registering session ${sessionId} as waiting for first assistant response`);
-  console.log(`🎯 EXEC TRACE: Claude PID: ${claudePid}, Terminal: ${terminalId}`);
-
-  executionSessionsWaitingForResponse.set(sessionId, {
-    claudePid,
     terminalId,
     startTime: Date.now()
   });
@@ -1219,27 +1095,8 @@ function handleFirstExecutionResponse(sessionId, claudeSessionId) {
     return;
   }
 
-  // Check if this session is waiting for response
-  const waitingData = executionSessionsWaitingForResponse.get(hollerSession.id);
-  if (!waitingData) {
-    console.log(`🎯 EXEC TRACE: [2/5] 🚫 Session ${hollerSession.id} not waiting for response - ignoring`);
-    return;
-  }
-
-  const waitTime = Date.now() - waitingData.startTime;
-  console.log(`🎯 EXEC TRACE: [2/5] ✅ MATCH! Session ${hollerSession.id} got first response after ${waitTime}ms`);
-  console.log(`🎯 EXEC TRACE: [3/5] Starting CPU time monitoring for Claude PID ${waitingData.claudePid}...`);
-
-  // Remove from waiting map
-  executionSessionsWaitingForResponse.delete(hollerSession.id);
-
-  // 🚫 DISABLED: CPU time monitoring replaced with Stop hook detection
-  console.log(`🎯 EXEC TRACE: [3/5] ✅ Using Stop hook for execution completion (old PID monitoring disabled)`);
-  // if (waitingData.claudePid) {
-  //   startCpuTimeMonitoring(hollerSession.id, waitingData.claudePid);
-  // } else {
-  //   console.error(`🎯 EXEC TRACE: [3/5] ❌ CRITICAL: No Claude PID found for session ${hollerSession.id} - cannot monitor!`);
-  // }
+  // 🚫 DISABLED: Old execution monitoring replaced with Stop hook detection
+  console.log(`🎯 EXEC TRACE: [2/5] 🚫 Session ${hollerSession.id} not waiting for response - ignoring`);
 }
 
 /**
@@ -2240,32 +2097,7 @@ ${rawClonedFileContent}
       });
     });
 
-    // 🎯 EXECUTION MONITORING: Register session as waiting for first assistant response
-    socket.on('execution:register-waiting', (data) => {
-      const { sessionId, claudePid, terminalId } = data;
-
-
-      // Validate required data
-      if (!sessionId || !claudePid || !terminalId) {
-        console.error(`❌ SOCKET: Missing required data for execution registration`);
-        socket.emit('execution:register-waiting:response', {
-          success: false,
-          error: 'Missing required fields: sessionId, claudePid, terminalId'
-        });
-        return;
-      }
-
-      // Register the session
-      registerExecutionSessionWaitingForResponse(sessionId, claudePid, terminalId);
-
-      // Respond with success
-      socket.emit('execution:register-waiting:response', {
-        success: true,
-        sessionId,
-        claudePid,
-        message: `Session ${sessionId} registered and waiting for first assistant response`
-      });
-    });
+    // 🗑️ REMOVED: Old execution monitoring socket handler - replaced by Stop hook
 
     // SESSION MANAGEMENT ENDPOINTS
     socket.on('session:list', () => {
